@@ -256,7 +256,7 @@ requires-dist = [
 [[package]]
 name = "tinygrad"
 version = "0.9.2"
-source = { git = "https://github.com/tinygrad/tinygrad.git#ea5654a9bca9f94cc90d5ac2bf1e483185735a06" }
+source = { git = "https://github.com/tinygrad/tinygrad.git#53db3478fef19d2c74d10a7b99e49a266e3abe16" }
 
 [[package]]
 name = "urllib3"

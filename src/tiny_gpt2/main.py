@@ -1,9 +1,12 @@
 import os
 import time
 import tiktoken
+from argparse import ArgumentParser
 
 import numpy as np
 from tinygrad import Device, Tensor, TinyJit, nn, GlobalCounters
+from tiny_gpt2.gpt import GPT, GPTConfig
+from tiny_gpt2.ngpt import NGPT, NGPTConfig
 
 ### hyper-parameters
 # model
@@ -20,96 +23,27 @@ num_epochs: int = 1
 lr = 1e-4
 
 
-class MultiHeadAttention:
-    def __init__(self):
-        assert n_embd % n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        # output projection
-        self.c_proj = nn.Linear(n_embd, n_embd)
-
-    def __call__(self, x: Tensor):
-        B, T, C = x.shape  # batch, ctx_len, n_embd
-        qkv = self.c_attn(x)
-        q, k, v = qkv.split(n_embd, dim=2)
-        k = k.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-
-        # manual implementation of attention
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        # att = att.softmax()
-        # y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        # y = y.transpose(1, 2).view(B, T, C)  # re-assemble all head outputs side by side
-
-        # optimized implementation of attention
-        y = q.scaled_dot_product_attention(k, v, is_causal=True)
-        y = y.view(B, T, C)  # re-assemble all head outputs side by side
-
-        # output projection
-        y = self.c_proj(y)
-        return y
+def get_model(model_name: str, checkpoint: str | None = None):
+    match model_name:
+        case "gpt":
+            return GPT(
+                GPTConfig(
+                    block_size, vocab_size, padded_vocab_size, n_layer, n_head, n_embd
+                ),
+                checkpoint,
+            )
+        case "ngpt":
+            return NGPT(
+                NGPTConfig(
+                    block_size, vocab_size, padded_vocab_size, n_layer, n_head, n_embd
+                ),
+                checkpoint,
+            )
+        case _:
+            raise ValueError(f"Unknown model name: {model_name}")
 
 
-class MLP:
-    def __init__(self):
-        self.c_fc = nn.Linear(n_embd, 4 * n_embd)
-        self.c_proj = nn.Linear(4 * n_embd, n_embd)
-
-    def __call__(self, x: Tensor) -> Tensor:
-        return self.c_proj(self.c_fc(x).gelu())
-
-
-class Block:
-    def __init__(self):
-        self.ln_1 = nn.LayerNorm(n_embd)
-        self.attn = MultiHeadAttention()
-        self.ln_2 = nn.LayerNorm(n_embd)
-        self.mlp = MLP()
-
-    def __call__(self, x: Tensor):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-
-class GPT:
-    def __init__(self):
-        self.wte = nn.Embedding(padded_vocab_size, n_embd)
-        self.wpe = nn.Embedding(block_size, n_embd)
-        self.h = [Block() for _ in range(n_layer)]
-        self.ln_f = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, padded_vocab_size, bias=False)
-        # weight tying (https://paperswithcode.com/method/weight-tying)
-        self.wte.weight = self.lm_head.weight
-
-    @staticmethod
-    def from_pretrained(path: str):
-        model = GPT()
-        nn.state.load_state_dict(model, nn.state.safe_load(path))
-        return model
-
-    def __call__(self, idx: Tensor):
-        B, T = idx.shape
-        pos = Tensor.arange(0, T)
-        tok_emb = self.wte(idx)  # token embeddings of shape (B, T, n_embd)
-        pos_emb = self.wpe(pos)  # position embeddings of shape (T, n_embd)
-        x = tok_emb + pos_emb
-        x = self.ln_f(x.sequential(self.h))
-        logits = self.lm_head(x)[:, :, :vocab_size]
-        return logits
-
-    def generate(self, ctx, max_new_tokens, temperature=1.0):
-        for _ in range(max_new_tokens):
-            logits = self(ctx[:, -block_size:])
-            logits = logits[:, -1, :] / temperature
-            next_tok = logits.softmax().multinomial()
-            ctx = Tensor.cat(ctx, next_tok, dim=1)
-        return ctx
-
-
-def get_batches(toks):
+def get_batches(toks: Tensor):
     """Lightweight dataloader"""
     i = 0
     while i + batch_size * ctx_len + 1 < len(toks):
@@ -140,6 +74,12 @@ def load_tokens(data_path: str):
     return Tensor(tokens_np)
 
 
+def model_name_parser() -> str:
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    return parser.parse_args().model
+
+
 def train():
     ### Load data
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
@@ -150,7 +90,8 @@ def train():
 
     ### Create model and optimizer
     assert 1 <= ctx_len <= block_size
-    model = GPT()
+    model_name = model_name_parser()
+    model = get_model(model_name)
     optimizer = nn.optim.AdamW(nn.state.get_parameters(model), lr=lr, weight_decay=0)
     print(
         f"Total number of trainable parameters: {sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
@@ -214,12 +155,14 @@ def train():
         if avg_eval_loss < best_val_loss:
             best_val_loss = avg_eval_loss
             nn.state.safe_save(
-                nn.state.get_state_dict(model), "checkpoints/best_gpt2.safetensors"
+                nn.state.get_state_dict(model),
+                f"checkpoints/best_{model_name}.safetensors",
             )
 
 
 def inference():
-    model = GPT.from_pretrained("checkpoints/best_gpt2.safetensors")
+    model_name = model_name_parser()
+    model = get_model(model_name, checkpoint="checkpoints/best_gpt2.safetensors")
     tokenizer = Tokenizer()
     val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
     ### Inference on the first sentence of the validation set
@@ -241,7 +184,3 @@ def inference():
             temperature=1.0,
         )[0]
         print(f"Actual output sentence: {tokenizer.decode(output)}")
-
-
-if __name__ == "__main__":
-    train()
