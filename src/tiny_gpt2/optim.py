@@ -9,6 +9,7 @@ class GenericAdam(nn.Optimizer):
     - Classical AdamW
     - Classical Adam (without weight decay)
     - Adam with normalization of weight matrices along their embedding dimension
+      (as described in https://arxiv.org/abs/2410.01131)
     """
 
     def __init__(
@@ -84,7 +85,11 @@ class SkewSymmetricRepresentantion:
 
 
 class CayleyAdam(nn.Optimizer):
-    """Riemannian version of Adam based on Cayley retractions and vector transport."""
+    """Riemannian version of Adam based on Cayley retractions and vector transport.
+
+    Adapted from the following paper describing the optimization scheme for the
+    Stiefel manifold: https://arxiv.org/abs/2002.01113
+    """
 
     def __init__(
         self,

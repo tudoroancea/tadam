@@ -131,6 +131,7 @@ class Block:
 
 
 class NGPT:
+    """ Normalized GPT model, as described in https://arxiv.org/abs/2410.01131 """
     def __init__(self, config: NGPTConfig, path: str | None = None):
         self.vocab_size, self.block_size = config.vocab_size, config.block_size
         self.wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
