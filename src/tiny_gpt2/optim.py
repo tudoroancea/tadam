@@ -3,7 +3,7 @@ from tinygrad import Tensor, nn
 __all__ = ["GenericAdam", "CayleyAdam"]
 
 
-class GenericAdam(nn.Optimizer):
+class GenericAdam(nn.optim.Optimizer):
     """Very general Adam implementation that covers multiple simple cases.
     In particular, it supports:
     - Classical AdamW
@@ -58,10 +58,45 @@ class GenericAdam(nn.Optimizer):
                 g = g + self.wd * p.detach()
             self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
             self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
-            m_hat = self.m[i] / (1.0 - self.b1_t)
-            v_hat = self.v[i] / (1.0 - self.b2_t)
-            up = m_hat / (v_hat.sqrt() + self.eps)
-            p.assign((p.detach() - self.lr * up).cast(p.dtype))
+            up = self.m[i] / (self.v[i].sqrt() + self.eps)
+            alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
+            p.assign((p.detach() - alpha * up).cast(p.dtype))
+            # normalize parameters that need to
+            if hasattr(p, "__normalized__"):
+                p.assign(p / p.square().sum(dim=-1).sqrt().unsqueeze(-1))
+
+        return [self.b1_t, self.b2_t] + self.m + self.v
+
+
+class IntermediateAdam(GenericAdam):
+    def __init__(
+        self,
+        params: list[Tensor],
+        lr=0.001,
+        beta1=0.9,
+        beta2=0.999,
+        eps=1e-8,
+        weight_decay=0.0,
+    ):
+        super().__init__(params, lr, beta1, beta2, eps, weight_decay)
+
+    def _step(self) -> list[Tensor]:
+        self.b1_t *= self.b1
+        self.b2_t *= self.b2
+        for i, p in enumerate(self.params):
+            assert p.grad is not None
+            g = p.grad
+            if self.wd != 0:
+                g = g + self.wd * p.detach()
+            self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
+            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
+            up = self.m[i] / (self.v[i].sqrt() + self.eps)
+            alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
+            # TODO: project descent direction onto tangent space
+            raise NotImplementedError(
+                "TODO: project descent direction onto tangent space"
+            )
+            p.assign((p.detach() - alpha * up).cast(p.dtype))
             # normalize parameters that need to
             if hasattr(p, "__normalized__"):
                 p.assign(p / p.square().sum(dim=-1).sqrt().unsqueeze(-1))
@@ -84,7 +119,7 @@ class SkewSymmetricRepresentantion:
         return first - self.x * (self.u * self.y).sum(-1, keepdims=True)
 
 
-class CayleyAdam(nn.Optimizer):
+class CayleyAdam(nn.optim.Optimizer):
     """Riemannian version of Adam based on Cayley retractions and vector transport.
 
     Adapted from the following paper describing the optimization scheme for the
@@ -100,6 +135,7 @@ class CayleyAdam(nn.Optimizer):
         eps=1e-8,
         weight_decay=0.0,
     ):
+        assert all([hasattr(p, "__normalized__") for p in params])
         super().__init__(params, lr)
         self.b1, self.b2, self.eps, self.wd = beta1, beta2, eps, weight_decay
         # beta1^t and beta2^t
@@ -147,7 +183,7 @@ class CayleyAdam(nn.Optimizer):
             # Approximate Cayley retraction
             y = x.detach() - alpha * w
             to_add = x.detach() - alpha / 2 * W.mul(x.detach(), is_x=True)
-            for i in range(2):
+            for _ in range(2):
                 y = to_add - alpha / 2 * W.mul(y)
             x.assign(y)
 

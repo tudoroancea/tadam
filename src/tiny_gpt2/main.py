@@ -7,20 +7,23 @@ import numpy as np
 from tinygrad import Device, Tensor, TinyJit, nn, GlobalCounters
 from tiny_gpt2.gpt import GPT, GPTConfig
 from tiny_gpt2.ngpt import NGPT, NGPTConfig
+from tiny_gpt2.optim import GenericAdam
+
+Tensor.manual_seed(127)
 
 ### hyper-parameters
 # model
-block_size: int = 1024
+block_size: int = 128
 vocab_size: int = 50257
 padded_vocab_size: int = 50304
-n_layer: int = 12
-n_head: int = 12
-n_embd: int = 768
+n_layer: int = 2
+n_head: int = 4
+n_embd: int = 128
 # training
-ctx_len: int = 8
+ctx_len: int = 128
 batch_size: int = 64
 num_epochs: int = 1
-lr = 1e-4
+lr = 1e-3
 
 
 def get_model(model_name: str, checkpoint: str | None = None):
@@ -41,6 +44,17 @@ def get_model(model_name: str, checkpoint: str | None = None):
             )
         case _:
             raise ValueError(f"Unknown model name: {model_name}")
+
+
+def split_parameters(params: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    # split parameters into two groups: those that need to be normalized and those that don't
+    norm_params, non_norm_params = [], []
+    for p in params:
+        if hasattr(p, "__normalized__"):
+            norm_params.append(p)
+        else:
+            non_norm_params.append(p)
+    return norm_params, non_norm_params
 
 
 def get_batches(toks: Tensor):
@@ -92,7 +106,15 @@ def train():
     assert 1 <= ctx_len <= block_size
     model_name = model_name_parser()
     model = get_model(model_name)
-    optimizer = nn.optim.AdamW(nn.state.get_parameters(model), lr=lr, weight_decay=0)
+    # optimizer = nn.optim.AdamW(nn.state.get_parameters(model), lr=lr, weight_decay=0)
+    optimizer = GenericAdam(nn.state.get_parameters(model), lr=lr)
+    # norm_params, non_norm_params = split_parameters(nn.state.get_parameters(model))
+    # optimizer = nn.optim.OptimizerGroup(
+    #     GenericAdam(norm_params, lr=lr, weight_decay=0),
+    #     # CayleyAdam(norm_params, lr=lr, weight_decay=0),
+    #     GenericAdam(non_norm_params, lr=lr, weight_decay=0),
+    # )
+
     print(
         f"Total number of trainable parameters: {sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
     )

@@ -37,13 +37,6 @@ class MultiHeadAttention:
             1, 2
         )  # (B, nh, T, hs)
 
-        # manual implementation of attention
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        # att = att.softmax()
-        # y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        # y = y.transpose(1, 2).view(B, T, C)  # re-assemble all head outputs side by side
-
         # optimized implementation of attention
         y = q.scaled_dot_product_attention(k, v, is_causal=True)
         y = y.view(B, T, C)  # re-assemble all head outputs side by side
@@ -78,7 +71,7 @@ class Block:
 
 
 class GPT:
-    def __init__(self, config: GPTConfig, path: str | None = None):
+    def __init__(self, config: GPTConfig, weights_path: str | None = None):
         self.vocab_size, self.block_size = config.vocab_size, config.block_size
         self.wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
@@ -88,8 +81,8 @@ class GPT:
         # weight tying (https://paperswithcode.com/method/weight-tying)
         self.wte.weight = self.lm_head.weight
         # load weights
-        if path is not None:
-            nn.state.load_state_dict(self, nn.state.safe_load(path))
+        if weights_path is not None:
+            nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
 
     def __call__(self, idx: Tensor):
         B, T = idx.shape

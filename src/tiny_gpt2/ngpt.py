@@ -1,5 +1,4 @@
 import math
-import numpy as np
 from dataclasses import dataclass
 
 from tinygrad import Tensor, nn
@@ -15,7 +14,6 @@ def normalize(x: Tensor) -> Tensor:
     return x / norm(x)
 
 
-
 @dataclass
 class NGPTConfig:
     block_size: int = 1024
@@ -28,12 +26,10 @@ class NGPTConfig:
     alpha_scale: float = 1.0 / math.sqrt(768)  # 1/sqrt(n_embd)
     s_qk_init: float = 1.0
     s_qk_scale: float = 1.0 / math.sqrt(768)  # 1/sqrt(n_embd)
-    s_u_init : float= 1.0
+    s_u_init: float = 1.0
     s_u_scale: float = 1.0
-    s_z_init : float= 1.0
+    s_z_init: float = 1.0
     s_z_scale: float = 1.0 / math.sqrt(768)  # 1/sqrt(n_embd)
-
-
 
 
 class NormalizedLinear:
@@ -44,7 +40,9 @@ class NormalizedLinear:
                 out_features, in_features, low=-bound, high=bound, requires_grad=True
             )
         )
-        setattr(self.weight, "__normalized__", True)
+        # Set special attribute to indicate the weights are supposed to be normalized
+        # after each optimization step.
+        self.weight.__normalized__ = True
 
     def __call__(self, x: Tensor) -> Tensor:
         # (B, T, Cin) x (Cin, Cout) -> (B, T, Cout)
@@ -74,8 +72,8 @@ class MultiHeadAttention:
         self.s_qk = Scale(head_size, init=1.0, scale=1.0 / math.sqrt(head_size))
         # causal mask
         self.causal_mask = Tensor.ones(
-            1, 1, config.block_size, config.block_size, requires_grad=False
-        ).tril()
+            config.block_size, config.block_size, requires_grad=False
+        ).triu()
 
     def __call__(self, x: Tensor):
         B, T, C = x.shape  # batch, ctx_len, n_embd
@@ -91,8 +89,8 @@ class MultiHeadAttention:
         k = normalize(k) * self.s_qk()
 
         # manual implementation of attention
-        att = (q @ k.transpose(-2, -1)) * math.sqrt(C)
-        att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
+        att = (q @ k.transpose(-2, -1)) * math.sqrt(C)  # (B, nh, T, T)
+        att = att.masked_fill(self.causal_mask[:T, :T], float("-inf"))
         att = att.softmax()
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).view(B, T, C)  # re-assemble all head outputs side by side
@@ -115,10 +113,12 @@ class MLP:
 
 class Block:
     def __init__(self, config: NGPTConfig):
+        # attention and MLP blocks
         self.attn = MultiHeadAttention(config)
         self.mlp = MLP(config)
+        # eigen learning rates
         self.alpha_attn = Scale(
-            config.n_embd, init=, scale=1.0 / math.sqrt(config.n_embd)
+            config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd)
         )
         self.alpha_mlp = Scale(
             config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd)
@@ -131,8 +131,13 @@ class Block:
 
 
 class NGPT:
-    """ Normalized GPT model, as described in https://arxiv.org/abs/2410.01131 """
-    def __init__(self, config: NGPTConfig, path: str | None = None):
+    def __init__(self, config: NGPTConfig, weights_path: str | None = None):
+        """Normalized GPT model, as described in https://arxiv.org/abs/2410.01131
+
+        Args:
+            config: NGPTConfig object containing the model configuration
+            weights_path: path to the weights file to load the model from
+        """
         self.vocab_size, self.block_size = config.vocab_size, config.block_size
         self.wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
@@ -146,8 +151,8 @@ class NGPT:
         # weight tying (https://paperswithcode.com/method/weight-tying)
         self.wte.weight = self.lm_head.weight
         # load weights
-        if path is not None:
-            nn.state.load_state_dict(self, nn.state.safe_load(path))
+        if weights_path is not None:
+            nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
 
     def __call__(self, idx: Tensor):
         B, T = idx.shape
