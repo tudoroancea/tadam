@@ -9,11 +9,13 @@ dependencies = [
     "icecream>=2.1.3",
     "numpy>=2.1.2",
     "pytest>=8.3.3",
+    "requests>=2.32.3",
     "tiktoken>=0.8.0",
     "tinygrad",
 ]
 
 [project.scripts]
+download_dataset = "tiny_gpt2.main:download_dataset"
 train = "tiny_gpt2.main:train"
 inference = "tiny_gpt2.main:inference"
 
@@ -31,7 +33,15 @@ typeCheckingMode = "off"
 
 [tool.ruff]
 indent-width = 4
+line-length = 120
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "W", "B"]
-ignore = ["E501"]
+select = [
+    # pycodestyle (errors and warnings)
+    "E",
+    "W",
+    # Pyflakes
+    "F",
+    # flake8-bugbear
+    "B",
+]

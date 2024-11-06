@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from tinygrad import Tensor, nn
+from tiny_gpt2.utils import load_state_dict
 
 __all__ = ["GPTConfig", "GPT"]
 
@@ -27,15 +28,9 @@ class MultiHeadAttention:
     def __call__(self, x: Tensor):
         B, T, C = x.shape  # batch, ctx_len, n_embd
         q, k, v = self.c_attn(x).split(C, dim=2)  # (B, T, C)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         # optimized implementation of attention
         y = q.scaled_dot_product_attention(k, v, is_causal=True)
@@ -82,7 +77,7 @@ class GPT:
         self.wte.weight = self.lm_head.weight
         # load weights
         if weights_path is not None:
-            nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
+            load_state_dict(self, nn.state.safe_load(weights_path))
 
     def __call__(self, idx: Tensor):
         B, T = idx.shape

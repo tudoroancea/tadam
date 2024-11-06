@@ -2,16 +2,9 @@ import math
 from dataclasses import dataclass
 
 from tinygrad import Tensor, nn
+from tiny_gpt2.utils import norm, normalize, load_state_dict
 
 __all__ = ["NGPTConfig", "NGPT", "norm", "normalize"]
-
-
-def norm(x: Tensor) -> Tensor:
-    return x.square().sum(-1, keepdim=True).sqrt()
-
-
-def normalize(x: Tensor) -> Tensor:
-    return x / norm(x)
 
 
 @dataclass
@@ -35,13 +28,8 @@ class NGPTConfig:
 class NormalizedLinear:
     def __init__(self, in_features: int, out_features: int):
         bound = 1 / math.sqrt(in_features)
-        self.weight = normalize(
-            Tensor.uniform(
-                out_features, in_features, low=-bound, high=bound, requires_grad=True
-            )
-        )
-        # Set special attribute to indicate the weights are supposed to be normalized
-        # after each optimization step.
+        self.weight = normalize(Tensor.uniform(out_features, in_features, low=-bound, high=bound))
+        # Set special attribute to indicate the weights are supposed to be normalized after each optimization step.
         self.weight.__normalized__ = True
 
     def __call__(self, x: Tensor) -> Tensor:
@@ -51,7 +39,7 @@ class NormalizedLinear:
 
 class Scale:
     def __init__(self, dim: int, init: float, scale: float) -> None:
-        self.scale = Tensor.full(dim, scale, requires_grad=True)
+        self.scale = Tensor.full(dim, scale)
         self.forward_scale = init / scale
 
     def __call__(self) -> Tensor:
@@ -62,6 +50,7 @@ class MultiHeadAttention:
     def __init__(self, config: NGPTConfig):
         n_embd = config.n_embd
         self.n_head = n_head = config.n_head
+        self.block_size = config.block_size
         assert n_embd % n_head == 0
         self.head_size = head_size = n_embd // n_head
         # key, query, value projections for all heads, but in a batch
@@ -71,9 +60,8 @@ class MultiHeadAttention:
         # query and key scaling
         self.s_qk = Scale(head_size, init=1.0, scale=1.0 / math.sqrt(head_size))
         # causal mask
-        self.causal_mask = Tensor.ones(
-            config.block_size, config.block_size, requires_grad=False
-        ).triu()
+        self.causal_mask = Tensor.ones(self.block_size, self.block_size).triu(1)
+        self.causal_mask.requires_grad = False
 
     def __call__(self, x: Tensor):
         B, T, C = x.shape  # batch, ctx_len, n_embd
@@ -90,7 +78,7 @@ class MultiHeadAttention:
 
         # manual implementation of attention
         att = (q @ k.transpose(-2, -1)) * math.sqrt(C)  # (B, nh, T, T)
-        att = att.masked_fill(self.causal_mask[:T, :T], float("-inf"))
+        att = att.masked_fill(self.causal_mask[:T, :T], -float("inf"))
         att = att.softmax()
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).view(B, T, C)  # re-assemble all head outputs side by side
@@ -117,17 +105,30 @@ class Block:
         self.attn = MultiHeadAttention(config)
         self.mlp = MLP(config)
         # eigen learning rates
-        self.alpha_attn = Scale(
-            config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd)
-        )
-        self.alpha_mlp = Scale(
-            config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd)
-        )
+        self.alpha_attn = Scale(config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd))
+        self.alpha_mlp = Scale(config.n_embd, init=1.0, scale=1.0 / math.sqrt(config.n_embd))
 
     def __call__(self, x: Tensor):
         x = normalize(x + self.alpha_attn() * (normalize(self.attn(x)) - x))
         x = normalize(x + self.alpha_mlp() * (normalize(self.mlp(x)) - x))
         return x
+
+
+class Embedding:
+    def __init__(self, vocab_size: int, embed_size: int):
+        self.vocab_sz = vocab_size
+        self.embed_sz = embed_size
+        self.weight = normalize(Tensor.glorot_uniform(vocab_size, embed_size))
+        # Set special attribute to indicate the weights are supposed to be normalized after each optimization step.
+        self.weight.__normalized__ = True
+        self.arange = Tensor.arange(self.vocab_sz, requires_grad=False).reshape(self.vocab_sz, 1)
+
+    def __call__(self, idx: Tensor) -> Tensor:
+        big_shp = idx.shape + (self.vocab_sz, self.embed_sz)
+        arange = self.arange.expand(big_shp)
+        idx = idx.reshape(idx.shape + (1, 1)).expand(big_shp)
+        vals = self.weight.expand(big_shp)
+        return (arange == idx).mul(vals).sum(-2)
 
 
 class NGPT:
@@ -139,20 +140,21 @@ class NGPT:
             weights_path: path to the weights file to load the model from
         """
         self.vocab_size, self.block_size = config.vocab_size, config.block_size
-        self.wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
-        self.wpe = nn.Embedding(config.block_size, config.n_embd)
+        self.wte = Embedding(config.padded_vocab_size, config.n_embd)
+        self.wpe = Embedding(config.block_size, config.n_embd)
         self.h = [Block(config) for _ in range(config.n_layer)]
-        self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=False)
+        self.lm_head = NormalizedLinear(config.n_embd, config.padded_vocab_size)
         self.s_z = Scale(
             config.padded_vocab_size,
             init=1.0,
             scale=1.0 / math.sqrt(config.padded_vocab_size),
         )
         # weight tying (https://paperswithcode.com/method/weight-tying)
+        assert self.wte.weight.shape == self.lm_head.weight.shape
         self.wte.weight = self.lm_head.weight
         # load weights
         if weights_path is not None:
-            nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
+            load_state_dict(self, nn.state.safe_load(weights_path))
 
     def __call__(self, idx: Tensor):
         B, T = idx.shape

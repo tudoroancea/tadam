@@ -1,4 +1,5 @@
 from tinygrad import Tensor, nn
+from tiny_gpt2.utils import normalize
 
 __all__ = ["GenericAdam", "CayleyAdam"]
 
@@ -60,10 +61,8 @@ class GenericAdam(nn.optim.Optimizer):
             self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
             up = self.m[i] / (self.v[i].sqrt() + self.eps)
             alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
-            p.assign((p.detach() - alpha * up).cast(p.dtype))
-            # normalize parameters that need to
-            if hasattr(p, "__normalized__"):
-                p.assign(p / p.square().sum(dim=-1).sqrt().unsqueeze(-1))
+            new_p = p.detach() - alpha * up
+            p.assign(normalize(new_p) if hasattr(p, "__normalized__") else new_p)
 
         return [self.b1_t, self.b2_t] + self.m + self.v
 

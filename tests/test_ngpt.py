@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
+from icecream import ic
 from tinygrad import Tensor, nn
+
 from tiny_gpt2.ngpt import NGPT, NGPTConfig, norm
 
 
@@ -26,13 +28,15 @@ def test_forward_pass(config):
         low=0,
         high=config.vocab_size,
     )
-    params = nn.state.get_parameters(model)
+    state_dict = nn.state.get_state_dict(model)
+    ic(state_dict)
+    params = list(state_dict.values())
     y = model(x).numpy()
     assert y.shape == (batch_size, ctx_len, config.padded_vocab_size)
     # check that all the weights are normalized
     for p in params:
         if hasattr(p, "__normalized__"):
-            print("normalized: ", p)
             assert np.allclose(norm(p).numpy(), 1.0)
-        else:
-            print("not normalized: ", p)
+
+    # check no NaNs
+    assert not np.any(np.isnan(y))
