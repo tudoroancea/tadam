@@ -11,7 +11,7 @@ dependencies = [
     "pytest>=8.3.3",
     "requests>=2.32.3",
     "tiktoken>=0.8.0",
-    "tinygrad",
+    "tinygrad==0.10.0",
 ]
 
 [project.scripts]
