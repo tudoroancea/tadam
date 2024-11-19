@@ -12,5 +12,8 @@ wheels/
 # Checkpoints
 *.safetensors
 
+# wandb logging
+wandb
+
 # Misc
 .DS_Store

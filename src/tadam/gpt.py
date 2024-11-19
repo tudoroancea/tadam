@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from tinygrad import Tensor, nn
-from tiny_gpt2.utils import load_state_dict
+from tadam.utils import load_state_dict
 
 __all__ = ["GPTConfig", "GPT"]
 

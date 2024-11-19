@@ -1,15 +1,17 @@
 import time
 from argparse import ArgumentParser
+import os
 
 import numpy as np
 import tiktoken
+import wandb
 from icecream import ic
-from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn
+from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 
-from tiny_gpt2.gpt import GPT, GPTConfig
-from tiny_gpt2.ngpt import NGPT, NGPTConfig
-from tiny_gpt2.optim import GenericAdam
-from tiny_gpt2.utils import get_state_dict
+from tadam.gpt import GPT, GPTConfig
+from tadam.ngpt import NGPT, NGPTConfig
+from tadam.optim import GenericAdam
+from tadam.utils import get_state_dict
 
 Tensor.manual_seed(127)
 
@@ -24,7 +26,7 @@ n_embd: int = 128
 # training
 ctx_len: int = 128
 batch_size: int = 64
-num_epochs: int = 10
+num_epochs: int = 2
 lr = 1e-3
 
 
@@ -69,7 +71,7 @@ def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], 
 def get_batches(toks: Tensor):
     """Lightweight dataloader"""
     i = 0
-    while i + batch_size * ctx_len + 1 < len(toks):
+    while i + batch_size * ctx_len + 1 < toks.shape[0]:
         x = toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
         y = toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
         yield x, y
@@ -131,7 +133,19 @@ def train():
         )
 
     print(f"Total number of trainable parameters: {sum(p.numel() for p in optimizer.params) / 1e6:.2f}M")
-    print("Starting training...\n=================\n")
+
+    ### Create logging stuff
+    os.makedirs("checkpoints", exist_ok=True)
+    wandb.init(
+        project="tadam",
+        config={
+            "model": model_name,
+            "optimizer": "adam",
+            "epochs": num_epochs,
+            "lr": lr,
+            "batch_size": batch_size,
+        },
+    )
 
     ### Training loop
     @TinyJit
@@ -149,6 +163,8 @@ def train():
         return loss.realize(*(norm_params + non_norm_params))  # TODO ???
 
     best_val_loss = float("inf")
+    train_losses_per_step = []
+    print("Starting training...\n=================\n")
     for epoch in range(1, 1 + num_epochs):
         # Training step
         with Tensor.train():
@@ -163,6 +179,8 @@ def train():
                 running_loss += loss.item()
                 elapsed = time.perf_counter() - t0
                 tflops = GlobalCounters.global_ops / elapsed / 1e12
+                train_losses_per_step.append(loss.item())
+                wandb.log({"loss": loss.item(), "epoch": epoch})
                 print(
                     f"\rStep {batch_cnt}, loss: {loss.item():.4f}, time: {elapsed*1000:.4f}ms, "
                     f"{batch_size*ctx_len/elapsed:.2f} tok/s, {tflops:.2f} TFLOPS",
@@ -183,6 +201,7 @@ def train():
                 running_loss += loss.item()
             avg_eval_loss = running_loss / batch_cnt
 
+        wandb.log({"val_loss": avg_eval_loss, "epoch": epoch})
         print(f"Epoch {epoch:2} | train loss: {avg_train_loss:.4f} | val loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint

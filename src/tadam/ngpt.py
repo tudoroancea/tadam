@@ -2,7 +2,7 @@ import math
 from dataclasses import dataclass
 
 from tinygrad import Tensor, nn
-from tiny_gpt2.utils import norm, normalize, load_state_dict
+from tadam.utils import norm, normalize, load_state_dict
 
 __all__ = ["NGPTConfig", "NGPT", "norm", "normalize"]
 

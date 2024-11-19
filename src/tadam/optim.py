@@ -1,5 +1,5 @@
 from tinygrad import Tensor, nn
-from tiny_gpt2.utils import normalize
+from tadam.utils import normalize
 
 __all__ = ["GenericAdam", "CayleyAdam"]
 
@@ -36,16 +36,12 @@ class GenericAdam(nn.optim.Optimizer):
         )
         # first moments
         self.m = [
-            Tensor.zeros(
-                *t.shape, dtype=t.dtype, device=t.device, requires_grad=False
-            ).contiguous()
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
             for t in self.params
         ]
         # second moments
         self.v = [
-            Tensor.zeros(
-                *t.shape, dtype=t.dtype, device=t.device, requires_grad=False
-            ).contiguous()
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
             for t in self.params
         ]
 
@@ -92,9 +88,7 @@ class IntermediateAdam(GenericAdam):
             up = self.m[i] / (self.v[i].sqrt() + self.eps)
             alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
             # TODO: project descent direction onto tangent space
-            raise NotImplementedError(
-                "TODO: project descent direction onto tangent space"
-            )
+            raise NotImplementedError("TODO: project descent direction onto tangent space")
             p.assign((p.detach() - alpha * up).cast(p.dtype))
             # normalize parameters that need to
             if hasattr(p, "__normalized__"):
@@ -139,24 +133,17 @@ class CayleyAdam(nn.optim.Optimizer):
         self.b1, self.b2, self.eps, self.wd = beta1, beta2, eps, weight_decay
         # beta1^t and beta2^t
         self.b1_t, self.b2_t = (
-            Tensor.ones(
-                (1,), dtype=params[0].dtype, device=self.device, requires_grad=False
-            ).contiguous()
+            Tensor.ones((1,), dtype=params[0].dtype, device=self.device, requires_grad=False).contiguous()
             for _ in [beta1, beta2]
         )
         # first moments
         self.m = [
-            Tensor.zeros(
-                *t.shape, dtype=t.dtype, device=t.device, requires_grad=False
-            ).contiguous()
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
             for t in self.params
         ]
         # second moments
         self.v = [
-            Tensor.zeros(
-                1, dtype=t.dtype, device=t.device, requires_grad=False
-            ).contiguous()
-            for t in self.params
+            Tensor.zeros(1, dtype=t.dtype, device=t.device, requires_grad=False).contiguous() for t in self.params
         ]
 
     def _step(self) -> list[Tensor]:

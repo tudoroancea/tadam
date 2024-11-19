@@ -3,7 +3,7 @@ import pytest
 from icecream import ic
 from tinygrad import Tensor, nn
 
-from tiny_gpt2.ngpt import NGPT, NGPTConfig, norm
+from tadam.ngpt import NGPT, NGPTConfig, norm
 
 
 @pytest.fixture
