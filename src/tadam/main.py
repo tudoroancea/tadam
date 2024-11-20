@@ -7,6 +7,7 @@ import tiktoken
 import wandb
 from icecream import ic
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
+from tinygrad.helpers import tqdm, Timing
 
 from tadam.gpt import GPT, GPTConfig
 from tadam.ngpt import NGPT, NGPTConfig
@@ -26,7 +27,7 @@ n_embd: int = 128
 # training
 ctx_len: int = 128
 batch_size: int = 64
-num_epochs: int = 2
+num_epochs: int = 20
 lr = 1e-3
 
 
@@ -68,14 +69,22 @@ def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], 
     return norm_state_dict, non_norm_state_dict
 
 
-def get_batches(toks: Tensor):
+class Dataset:
     """Lightweight dataloader"""
-    i = 0
-    while i + batch_size * ctx_len + 1 < toks.shape[0]:
-        x = toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
-        y = toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
-        yield x, y
-        i += batch_size * ctx_len
+
+    def __init__(self, toks: Tensor):
+        self.toks = toks
+
+    def __len__(self):
+        return self.toks.shape[0] // (batch_size * ctx_len + 1)
+
+    def __iter__(self):
+        i = 0
+        while i + batch_size * ctx_len + 1 < self.toks.shape[0]:
+            x = self.toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
+            y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
+            yield x, y
+            i += batch_size * ctx_len
 
 
 class Tokenizer:
@@ -107,10 +116,13 @@ def model_name_parser() -> str:
 def train():
     ### Load data
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    train_dataset = Dataset(train_tokens)
     val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    val_dataset = Dataset(val_tokens)
     print(
         f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and {len(val_tokens)/1e3:.2f}K validation tokens."
     )
+    print(len(train_dataset), len(val_dataset))
 
     ### Create model and optimizer
     assert 1 <= ctx_len <= block_size
@@ -144,6 +156,8 @@ def train():
             "epochs": num_epochs,
             "lr": lr,
             "batch_size": batch_size,
+            "device": Device.DEFAULT,
+            "beam": os.getenv("BEAM", 0),
         },
     )
 
@@ -170,38 +184,46 @@ def train():
         with Tensor.train():
             batch_cnt = 0
             running_loss = 0
-            for x, y in get_batches(train_tokens):
+            for x, y in (pbar := tqdm(train_dataset, unit="steps")):
                 GlobalCounters.reset()
                 batch_cnt += 1
                 t0 = time.perf_counter()
                 loss = training_step(x.contiguous(), y.contiguous())
                 Device[Device.DEFAULT].synchronize()
                 running_loss += loss.item()
-                elapsed = time.perf_counter() - t0
-                tflops = GlobalCounters.global_ops / elapsed / 1e12
+                step_runtime_s = time.perf_counter() - t0
+                step_runtime_ms = step_runtime_s * 1000
+                tflops = GlobalCounters.global_ops / step_runtime_s / 1e12
                 train_losses_per_step.append(loss.item())
-                wandb.log({"loss": loss.item(), "epoch": epoch})
-                print(
-                    f"\rStep {batch_cnt}, loss: {loss.item():.4f}, time: {elapsed*1000:.4f}ms, "
-                    f"{batch_size*ctx_len/elapsed:.2f} tok/s, {tflops:.2f} TFLOPS",
-                    end="",
+                ktok_per_s = batch_size * ctx_len / step_runtime_s / 1e3
+                wandb.log(
+                    {
+                        "train_loss": loss.item(),
+                        "epoch": epoch,
+                        "performance/ktok_per_s": ktok_per_s,
+                        "performance/step_runtime_ms": step_runtime_ms,
+                        "performance/TFLOPS": tflops,
+                    }
                 )
-            print("")
+                pbar.desc = (
+                    f"train loss: {loss.item():.4f}, step time: {step_runtime_ms:.4f}ms, "
+                    f"{ktok_per_s:.2f} tok/s, {tflops:.2f} TFLOPS "
+                )
             avg_train_loss = running_loss / batch_cnt
 
         # Evaluation step
         with Tensor.test():
             batch_cnt = 0
             running_loss = 0
-            for x, y in get_batches(val_tokens):
-                # for x, y in get_validation_batches():
+            for x, y in (pbar := tqdm(val_dataset, unit="steps")):
                 batch_cnt += 1
                 loss = eval_step(x.contiguous(), y.contiguous())
                 Device[Device.DEFAULT].synchronize()
                 running_loss += loss.item()
+                pbar.desc = f"val_loss: {loss.item():.4f} "
             avg_eval_loss = running_loss / batch_cnt
 
-        wandb.log({"val_loss": avg_eval_loss, "epoch": epoch})
+        wandb.log({"val_loss": avg_eval_loss})
         print(f"Epoch {epoch:2} | train loss: {avg_train_loss:.4f} | val loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint
