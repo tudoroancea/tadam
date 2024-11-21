@@ -111,6 +111,9 @@ class SkewSymmetricRepresentantion:
         first = self.u if is_x else self.u * (self.x * self.y).sum(-1, keepdims=True)
         return first - self.x * (self.u * self.y).sum(-1, keepdims=True)
 
+    def norm(self):
+        raise NotImplementedError("TODO: implement norm")
+
 
 class CayleyAdam(nn.optim.Optimizer):
     """Riemannian version of Adam based on Cayley retractions and vector transport.
@@ -156,8 +159,9 @@ class CayleyAdam(nn.optim.Optimizer):
             if self.wd != 0:
                 g = g + self.wd * x.detach()
             # Update second moment
-            self.v[i].assign(self.b2 * self.v[i] + (1 - self.b2) * g.square())
-            s = (1 - self.b2_t) / (1 - self.b1_t) / (self.eps + self.v[i].sqrt())
+            # TODO: project gradient
+            self.v[i].assign(self.b2 * self.v[i] + (1 - self.b2) * g.square().sum())
+            s = (1 - self.b2_t) / (1 - self.b1_t) / (self.v[i].sqrt() + self.eps)
             # Update first moment and compute skew-symmetric representation
             M = SkewSymmetricRepresentantion(x, self.b1 * self.m[i] + (1 - self.b1) * g)
             self.m[i].assign(M.mul(x, is_x=True))
@@ -165,7 +169,9 @@ class CayleyAdam(nn.optim.Optimizer):
             W = s * M
             w = s * self.m[i]
             # Select step size
-            alpha = min(self.lr, 1 / (W.square().sum().sqrt() + self.eps))
+            # TODO: compute norm of W
+            normW = W.square().sum().sqrt()
+            alpha = min(self.lr, 1 / (normW + self.eps))
             # Approximate Cayley retraction
             y = x.detach() - alpha * w
             to_add = x.detach() - alpha / 2 * W.mul(x.detach(), is_x=True)

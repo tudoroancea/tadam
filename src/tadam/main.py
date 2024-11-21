@@ -7,7 +7,7 @@ import tiktoken
 import wandb
 from icecream import ic
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
-from tinygrad.helpers import tqdm, Timing
+from tinygrad.helpers import tqdm
 
 from tadam.gpt import GPT, GPTConfig
 from tadam.ngpt import NGPT, NGPTConfig
@@ -27,7 +27,7 @@ n_embd: int = 128
 # training
 ctx_len: int = 128
 batch_size: int = 64
-num_epochs: int = 20
+num_epochs: int = 50
 lr = 1e-3
 
 
@@ -150,6 +150,7 @@ def train():
     os.makedirs("checkpoints", exist_ok=True)
     wandb.init(
         project="tadam",
+        name=f"{model_name}-{lr}-{num_epochs}",
         config={
             "model": model_name,
             "optimizer": "adam",

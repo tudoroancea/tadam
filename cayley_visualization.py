@@ -22,18 +22,17 @@ def cayley_retraction(x: np.ndarray, u: np.ndarray):
     :param u: shape (B,n)
     """
     x = x[None, :]
-    O = u[:, :, None] * x[:, None, :] - x[:, :, None] * u[:, None, :]
-    C = np.linalg.solve(np.eye(x.shape[1]) - 0.5 * O, np.eye(x.shape[1]) + 0.5 * O)
+    Omega = u[:, :, None] * x[:, None, :] - x[:, :, None] * u[:, None, :]
+    C = np.linalg.solve(np.eye(x.shape[1]) - 0.5 * Omega, np.eye(x.shape[1]) + 0.5 * Omega)
     return np.squeeze(C @ x[:, :, None])
 
 
 def approx_cayley_retraction(x: np.ndarray, u: np.ndarray, iter: int):
     x = x[None, :]
     y = x
-    O = u[:, :, None] * x[:, None, :] - x[:, :, None] * u[:, None, :]  # ()
-    # breakpoint()
+    Omega = u[:, :, None] * x[:, None, :] - x[:, :, None] * u[:, None, :]  # ()
     for _ in range(iter):
-        y = x + 0.5 * np.squeeze(O @ (x + y)[:, :, None])
+        y = x + 0.5 * np.squeeze(Omega @ (x + y)[:, :, None])
     return normalize(np.squeeze(y))
 
 
