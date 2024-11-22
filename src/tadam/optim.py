@@ -4,6 +4,31 @@ from tadam.utils import normalize
 __all__ = ["GenericAdam", "CayleyAdam"]
 
 
+class SkewSymmetricRepresentantion:
+    def __init__(self, x: Tensor, u: Tensor):
+        self.x = x  # (..., n)
+        self.u = u  # (..., n)
+
+    def __mul__(self, other: float):
+        return SkewSymmetricRepresentantion(self.x, self.u * other)
+
+    __rmul__ = __mul__
+
+    def mul(self, y: Tensor, is_x: bool = False):
+        first = self.u if is_x else self.u * (self.x * self.y).sum(-1, keepdims=True)
+        return first - self.x * (self.u * self.y).sum(-1, keepdims=True)
+
+    def norm(self):
+        raise NotImplementedError("TODO: implement norm")
+
+
+def project(x: Tensor, u: Tensor):
+    """Projects a vector u onto the tangent space of x.
+    Complexity: ≈4n flops where n=x.numel()
+    """
+    return x - u * (x * u).sum(-1, keepdims=True)
+
+
 class GenericAdam(nn.optim.Optimizer):
     """Very general Adam implementation that covers multiple simple cases.
     In particular, it supports:
@@ -73,46 +98,45 @@ class IntermediateAdam(GenericAdam):
         eps=1e-8,
         weight_decay=0.0,
     ):
-        super().__init__(params, lr, beta1, beta2, eps, weight_decay)
+        assert all([hasattr(p, "__normalized__") for p in params])
+        super().__init__(params, lr)
+        self.b1, self.b2, self.eps, self.wd = beta1, beta2, eps, weight_decay
+        # beta1^t and beta2^t
+        self.b1_t, self.b2_t = (
+            Tensor.ones((1,), dtype=params[0].dtype, device=self.device, requires_grad=False).contiguous()
+            for _ in [beta1, beta2]
+        )
+        # first moments
+        self.m = [
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
+            for t in self.params
+        ]
+        # second moments
+        self.v = [
+            Tensor.zeros(1, dtype=t.dtype, device=t.device, requires_grad=False).contiguous() for t in self.params
+        ]
 
     def _step(self) -> list[Tensor]:
         self.b1_t *= self.b1
         self.b2_t *= self.b2
         for i, p in enumerate(self.params):
-            assert p.grad is not None
-            g = p.grad
+            x = p.detach()
+            # compute euclidean and riemannian gradients
+            euclidean_grad = p.grad.detach()
             if self.wd != 0:
-                g = g + self.wd * p.detach()
-            self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
-            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
-            up = self.m[i] / (self.v[i].sqrt() + self.eps)
-            alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
-            # TODO: project descent direction onto tangent space
-            raise NotImplementedError("TODO: project descent direction onto tangent space")
-            p.assign((p.detach() - alpha * up).cast(p.dtype))
-            # normalize parameters that need to
-            if hasattr(p, "__normalized__"):
-                p.assign(p / p.square().sum(dim=-1).sqrt().unsqueeze(-1))
+                euclidean_grad = euclidean_grad + self.wd * x
+            riemannian_grad = project(x, euclidean_grad)
+            # accumulate first and second moments
+            self.m[i].assign(self.b1 * project(x, self.m[i]) + (1.0 - self.b1) * riemannian_grad)
+            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * riemannian_grad.square().sum())
+            # create descent direction
+            step_size = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t) / (self.v[i].sqrt() + self.eps)
+            # descent_direction = step_size * self.m[i]
+            descent_direction = project(x, step_size * self.m[i])  # project for numerical stability
+            # perform retraction (by simple normalization)
+            p.assign((x - descent_direction) / (1 + descent_direction.square().sum()).sqrt())
 
         return [self.b1_t, self.b2_t] + self.m + self.v
-
-
-class SkewSymmetricRepresentantion:
-    def __init__(self, x: Tensor, u: Tensor):
-        self.x = x  # (..., n)
-        self.u = u  # (..., n)
-
-    def __mul__(self, other: float):
-        return SkewSymmetricRepresentantion(self.x, self.u * other)
-
-    __rmul__ = __mul__
-
-    def mul(self, y: Tensor, is_x: bool = False):
-        first = self.u if is_x else self.u * (self.x * self.y).sum(-1, keepdims=True)
-        return first - self.x * (self.u * self.y).sum(-1, keepdims=True)
-
-    def norm(self):
-        raise NotImplementedError("TODO: implement norm")
 
 
 class CayleyAdam(nn.optim.Optimizer):

@@ -11,7 +11,7 @@ from tinygrad.helpers import tqdm
 
 from tadam.gpt import GPT, GPTConfig
 from tadam.ngpt import NGPT, NGPTConfig
-from tadam.optim import GenericAdam
+from tadam.optim import GenericAdam, IntermediateAdam, CayleyAdam
 from tadam.utils import get_state_dict
 
 Tensor.manual_seed(127)
@@ -165,11 +165,16 @@ def train():
         optimizer = GenericAdam(non_norm_params, lr=lr)
     elif model_name == "ngpt":
         assert len(norm_params) > 0
-        optimizer = nn.optim.OptimizerGroup(
-            GenericAdam(norm_params, lr=lr, weight_decay=0),
-            # CayleyAdam(norm_params, lr=lr, weight_decay=0),
-            GenericAdam(non_norm_params, lr=lr, weight_decay=0),
-        )
+        match optimizer_name:
+            case "adam":
+                first_optimizer = GenericAdam(norm_params, lr=lr, weight_decay=0)
+            case "intermediate_adam":
+                first_optimizer = IntermediateAdam(norm_params, lr=lr, weight_decay=0)
+            case "cayley":
+                first_optimizer = CayleyAdam(norm_params, lr=lr, weight_decay=0)
+            case _:
+                raise ValueError(f"Unknown optimizer name: {optimizer_name}")
+        optimizer = nn.optim.OptimizerGroup(first_optimizer, GenericAdam(non_norm_params, lr=lr, weight_decay=0))
 
     total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
     ic(total_number_trainable_parameters, norm_params, non_norm_params)
