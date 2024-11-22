@@ -114,6 +114,36 @@ def model_name_parser() -> str:
 
 
 def train():
+    ### Parse cli arguments
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--save_checkpoints", action="store_true")
+    args = parser.parse_args()
+    model_name = args.model
+    optimizer_name = args.optimizer
+    lr = args.lr
+    num_epochs = args.epochs
+    save_checkpoints = args.save_checkpoints
+
+    ### Create logging stuff
+    os.makedirs("checkpoints", exist_ok=True)
+    wandb.init(
+        project="tadam",
+        name=f"{model_name}-{lr}-{num_epochs}",
+        config={
+            "model": model_name,
+            "optimizer": optimizer_name,
+            "epochs": num_epochs,
+            "lr": lr,
+            "batch_size": batch_size,
+            "device": Device.DEFAULT,
+            "beam": os.getenv("BEAM", 0),
+        },
+    )
+
     ### Load data
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
     train_dataset = Dataset(train_tokens)
@@ -122,15 +152,12 @@ def train():
     print(
         f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and {len(val_tokens)/1e3:.2f}K validation tokens."
     )
-    print(len(train_dataset), len(val_dataset))
 
     ### Create model and optimizer
     assert 1 <= ctx_len <= block_size
-    model_name = model_name_parser()
     model = get_model(model_name)
     state_dict = get_state_dict(model)
     norm_params, non_norm_params = split_state_dict(state_dict)
-    ic(norm_params, non_norm_params)
     norm_params = list(norm_params.values())
     non_norm_params = list(non_norm_params.values())
     if model_name == "gpt":
@@ -144,23 +171,8 @@ def train():
             GenericAdam(non_norm_params, lr=lr, weight_decay=0),
         )
 
-    print(f"Total number of trainable parameters: {sum(p.numel() for p in optimizer.params) / 1e6:.2f}M")
-
-    ### Create logging stuff
-    os.makedirs("checkpoints", exist_ok=True)
-    wandb.init(
-        project="tadam",
-        name=f"{model_name}-{lr}-{num_epochs}",
-        config={
-            "model": model_name,
-            "optimizer": "adam",
-            "epochs": num_epochs,
-            "lr": lr,
-            "batch_size": batch_size,
-            "device": Device.DEFAULT,
-            "beam": os.getenv("BEAM", 0),
-        },
-    )
+    total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
+    ic(total_number_trainable_parameters, norm_params, non_norm_params)
 
     ### Training loop
     @TinyJit
@@ -228,7 +240,7 @@ def train():
         print(f"Epoch {epoch:2} | train loss: {avg_train_loss:.4f} | val loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint
-        if avg_eval_loss < best_val_loss:
+        if save_checkpoints and avg_eval_loss < best_val_loss:
             best_val_loss = avg_eval_loss
             nn.state.safe_save(
                 get_state_dict(model),
@@ -237,8 +249,14 @@ def train():
 
 
 def inference():
-    model_name = model_name_parser()
+    ### Parse cli arguments
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--save_checkpoints", action="store_true")
+    model_name = parser.parse_args().model
+    ### Load model
     model = get_model(model_name, checkpoint=f"checkpoints/best_{model_name}.safetensors")
+    ### Load validation data and tokenizer
     tokenizer = Tokenizer()
     val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
     ### Inference on the first sentence of the validation set
