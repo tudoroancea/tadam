@@ -119,12 +119,14 @@ def train():
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--save_checkpoints", action="store_true")
+    parser.add_argument("--wd", type=float, default=0.0)
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
     lr = args.lr
+    wd = args.wd
     num_epochs = args.epochs
     save_checkpoints = args.save_checkpoints
 
@@ -132,12 +134,13 @@ def train():
     os.makedirs("checkpoints", exist_ok=True)
     wandb.init(
         project="tadam",
-        name=f"{model_name}-{lr}-{num_epochs}",
+        name=f"{model_name}-{optimizer_name}-{lr}" + (f"-{wd}" if args.wd > 0 else ""),
         config={
             "model": model_name,
             "optimizer": optimizer_name,
             "epochs": num_epochs,
             "lr": lr,
+            "wd": wd,
             "batch_size": batch_size,
             "device": Device.DEFAULT,
             "beam": os.getenv("BEAM", 0),
@@ -162,7 +165,8 @@ def train():
     non_norm_params = list(non_norm_params.values())
     if model_name == "gpt":
         assert len(norm_params) == 0
-        optimizer = GenericAdam(non_norm_params, lr=lr)
+        assert optimizer_name == "adam"
+        optimizer = GenericAdam(non_norm_params, lr=lr, weight_decay=wd)
     elif model_name == "ngpt":
         assert len(norm_params) > 0
         match optimizer_name:
@@ -242,7 +246,7 @@ def train():
             avg_eval_loss = running_loss / batch_cnt
 
         wandb.log({"val_loss": avg_eval_loss})
-        print(f"Epoch {epoch:2} | train loss: {avg_train_loss:.4f} | val loss: {avg_eval_loss:.4f}")
+        print(f"Epoch {epoch:2} | avg train loss: {avg_train_loss:.4f} | avg val loss: {avg_eval_loss:.4f}")
 
         # Save checkpoint
         if save_checkpoints and avg_eval_loss < best_val_loss:

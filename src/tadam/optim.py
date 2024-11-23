@@ -9,14 +9,20 @@ class SkewSymmetricRepresentantion:
         self.x = x  # (..., n)
         self.u = u  # (..., n)
 
-    def __mul__(self, other: float):
+    def __mul__(self, other: float) -> "SkewSymmetricRepresentantion":
         return SkewSymmetricRepresentantion(self.x, self.u * other)
 
     __rmul__ = __mul__
 
-    def mul(self, y: Tensor, is_x: bool = False):
-        first = self.u if is_x else self.u * (self.x * self.y).sum(-1, keepdims=True)
-        return first - self.x * (self.u * self.y).sum(-1, keepdims=True)
+    def __imul__(self, other: float) -> "SkewSymmetricRepresentantion":
+        self.u.assign(self.u * other)
+        return self
+
+    __irmul__ = __imul__
+
+    def mul(self, y: Tensor, is_x: bool = False) -> Tensor:
+        first = self.u if is_x else self.u * (self.x * self.y).sum(-1, keepdim=True)
+        return first - self.x * (self.u * self.y).sum(-1, keepdim=True)
 
     def norm(self):
         raise NotImplementedError("TODO: implement norm")
@@ -26,7 +32,7 @@ def project(x: Tensor, u: Tensor):
     """Projects a vector u onto the tangent space of x.
     Complexity: ≈4n flops where n=x.numel()
     """
-    return x - u * (x * u).sum(-1, keepdims=True)
+    return u - x * (u * x).sum(-1, keepdim=True)
 
 
 class GenericAdam(nn.optim.Optimizer):
@@ -74,21 +80,27 @@ class GenericAdam(nn.optim.Optimizer):
         self.b1_t *= self.b1
         self.b2_t *= self.b2
         for i, p in enumerate(self.params):
+            x = p.detach()
             assert p.grad is not None
             g = p.grad
             if self.wd != 0:
                 g = g + self.wd * p.detach()
             self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
-            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g))
+            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * g.square())
             up = self.m[i] / (self.v[i].sqrt() + self.eps)
             alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
-            new_p = p.detach() - alpha * up
-            p.assign(normalize(new_p) if hasattr(p, "__normalized__") else new_p)
+            if hasattr(p, "__normalized__"):
+                p.assign(normalize(x - project(x, alpha * up)))
+                # p.assign(normalize(x -  alpha * up))
+            else:
+                p.assign(x - alpha * up)
 
         return [self.b1_t, self.b2_t] + self.m + self.v
 
 
 class IntermediateAdam(GenericAdam):
+    """Intermediate Adam version"""
+
     def __init__(
         self,
         params: list[Tensor],
@@ -112,29 +124,31 @@ class IntermediateAdam(GenericAdam):
             for t in self.params
         ]
         # second moments
+        # we assume the weight has shape (nout, nin)
         self.v = [
-            Tensor.zeros(1, dtype=t.dtype, device=t.device, requires_grad=False).contiguous() for t in self.params
+            Tensor.zeros(t.shape[0], dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
+            for t in self.params
         ]
 
     def _step(self) -> list[Tensor]:
         self.b1_t *= self.b1
         self.b2_t *= self.b2
         for i, p in enumerate(self.params):
-            x = p.detach()
+            x = p.detach()  # important because we can assign to p only tensors with requires_grad=False
             # compute euclidean and riemannian gradients
-            euclidean_grad = p.grad.detach()
+            euclidean_grad = p.grad
             if self.wd != 0:
                 euclidean_grad = euclidean_grad + self.wd * x
             riemannian_grad = project(x, euclidean_grad)
             # accumulate first and second moments
             self.m[i].assign(self.b1 * project(x, self.m[i]) + (1.0 - self.b1) * riemannian_grad)
-            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * riemannian_grad.square().sum())
+            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * riemannian_grad.square().sum(-1))
+            # self.v[i].assign(self.b2 * project(x, self.v[i]) + (1.0 - self.b2) * riemannian_grad.square())
             # create descent direction
-            step_size = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t) / (self.v[i].sqrt() + self.eps)
-            # descent_direction = step_size * self.m[i]
-            descent_direction = project(x, step_size * self.m[i])  # project for numerical stability
+            step_size = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
+            descent_direction = project(x, (self.m[i] / (self.v[i].sqrt().view(-1, 1) + self.eps)))
             # perform retraction (by simple normalization)
-            p.assign((x - descent_direction) / (1 + descent_direction.square().sum()).sqrt())
+            p.assign(normalize(x - step_size * descent_direction))
 
         return [self.b1_t, self.b2_t] + self.m + self.v
 
