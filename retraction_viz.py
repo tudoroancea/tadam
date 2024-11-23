@@ -36,6 +36,13 @@ def approx_cayley_retraction(x: np.ndarray, u: np.ndarray, iter: int):
     return normalize(np.squeeze(y))
 
 
+def exp(x: np.ndarray, u: np.ndarray):
+    norm_u = norm(u)[:, None]
+    x = x[None, :]
+    u /= norm_u
+    return np.cos(norm_u) * x + np.sin(norm_u) * u
+
+
 def plot_sphere(ax: Axes):
     # plot sphere surface
     u = np.linspace(0, 2 * np.pi, 100)
@@ -64,6 +71,7 @@ def main():
     us = np.array([1, 0, 0])
     uc = np.array([0, 1, 0])
     ua = np.array([0, -1, 0])
+    ue = np.array([-1, 0, 0])
 
     xs = simple_retraction(x, t[:, None] * us[None, :])
     assert np.allclose(norm(xs), 1.0)
@@ -71,6 +79,7 @@ def main():
     assert np.allclose(norm(xc), 1.0)
     xa = approx_cayley_retraction(x, t[:, None] * ua[None, :], iter=2)
     ic(norm(xa))
+    xe = exp(x, t[:, None] * ue[None, :])
 
     # plot everything in 3d
     plt.figure().add_subplot(projection="3d")
@@ -78,12 +87,16 @@ def main():
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
+
     ax.scatter(x[0], x[1], x[2], label="x", s=10)
     plot_vector(x, us, ax, color="g", label="simple")
     ax.scatter(xs[:, 0], xs[:, 1], xs[:, 2], s=10, c=t, cmap="jet")
     plot_vector(x, uc, ax, color="r", label="exact cayley")
     ax.scatter(xc[:, 0], xc[:, 1], xc[:, 2], s=10, c=t, cmap="jet")
     plot_vector(x, ua, ax, color="m", label="approx cayley")
+    ax.scatter(xe[:, 0], xe[:, 1], xe[:, 2], s=10, c=t, cmap="jet")
+    plot_vector(x, ue, ax, color="b", label="exp")
+
     points = ax.scatter(xa[:, 0], xa[:, 1], xa[:, 2], s=10, c=t, cmap="jet")
     # plot the surface of the sphere
     plot_sphere(ax)
