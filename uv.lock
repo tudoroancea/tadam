@@ -454,7 +454,7 @@ requires-dist = [
     { name = "pytest", specifier = ">=8.3.3" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "tiktoken", specifier = ">=0.8.0" },
-    { name = "tinygrad", git = "https://github.com/tinygrad/tinygrad.git" },
+    { name = "tinygrad", specifier = "==0.10.0" },
     { name = "wandb", specifier = ">=0.18.7" },
 ]
 
@@ -485,7 +485,11 @@ wheels = [
 [[package]]
 name = "tinygrad"
 version = "0.10.0"
-source = { git = "https://github.com/tinygrad/tinygrad.git#d5f76462c8e693bd43e6b0f93e5de8171155e8cc" }
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/b1/5555df29138dabe90c1ac225f0e925af007f4a8d48006cc09d5cd94e8638/tinygrad-0.10.0.tar.gz", hash = "sha256:24412219a1467c49892b35e61f283f5992b128539e90743df465af33408e73e7", size = 1148463 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/ec/b3fc8a55408eb1e03e279963db06e7b2c405b8456f1c9699b64516e36a72/tinygrad-0.10.0-py3-none-any.whl", hash = "sha256:d2c02b67e704ead674ff045b55bb6cd6ee179e0980071f9b5552ea90323c7674", size = 1045775 },
+]
 
 [[package]]
 name = "urllib3"
