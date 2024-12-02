@@ -1,22 +1,24 @@
+import math
+import os
 import time
 from argparse import ArgumentParser
-import os
 
 import numpy as np
 import tiktoken
-import wandb
 from icecream import ic
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
+import wandb
 from tadam.gpt import GPT, GPTConfig
 from tadam.ngpt import NGPT, NGPTConfig
-from tadam.optim import GenericAdam, IntermediateAdam, CayleyAdam
+from tadam.optim import CayleyAdam, GenericAdam, IntermediateAdam
 from tadam.utils import get_state_dict
 
 Tensor.manual_seed(127)
 
 ### hyper-parameters
+skip_eval = False
 # model
 block_size: int = 128
 vocab_size: int = 50257
@@ -40,7 +42,22 @@ def get_model(model_name: str, checkpoint: str | None = None):
             )
         case "ngpt":
             return NGPT(
-                NGPTConfig(block_size, vocab_size, padded_vocab_size, n_layer, n_head, n_embd),
+                NGPTConfig(
+                    block_size,
+                    vocab_size,
+                    padded_vocab_size,
+                    n_layer,
+                    n_head,
+                    n_embd,
+                    1 / n_layer,
+                    1 / math.sqrt(n_embd),
+                    1.0,
+                    1 / math.sqrt(n_embd),
+                    1.0,
+                    1.0,
+                    1.0,
+                    1 / math.sqrt(n_embd),
+                ),
                 checkpoint,
             )
         case _:
@@ -70,21 +87,38 @@ def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], 
 
 
 class Dataset:
-    """Lightweight dataloader"""
+    """
+    one seq:
 
-    def __init__(self, toks: Tensor):
+
+    """
+
+    def __init__(self, toks: Tensor, random_order: bool = True):
         self.toks = toks
+        self.random_order = random_order
+        self.indices = self._gen_indices()
 
     def __len__(self):
         return self.toks.shape[0] // (batch_size * ctx_len + 1)
 
+    def _gen_indices(self):
+        return np.random.permutation(len(self)) if self.random_order else np.arange(len(self))
+
     def __iter__(self):
-        i = 0
-        while i + batch_size * ctx_len + 1 < self.toks.shape[0]:
+        Tensor.randint(0, len(self), out=self.indices)
+        self.indices = self._gen_indices()
+        for idx in self.indices:
+            i = int(idx * (batch_size * ctx_len + 1))
             x = self.toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
             y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
             yield x, y
-            i += batch_size * ctx_len
+
+
+def get_batch(toks: Tensor):
+    idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
+    x = toks[idx + Tensor.arange(ctx_len)].contiguous()
+    y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
+    return x, y
 
 
 class Tokenizer:
@@ -119,42 +153,52 @@ def train():
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--wd", type=float, default=0.0)
+    parser.add_argument("--train_steps", type=int, default=100)
+    parser.add_argument("--eval_steps", type=int, default=10)
+    parser.add_argument("--eval_interval", type=int, default=200)
+    parser.add_argument("--save_checkpoints", action="store_true")
+    parser.add_argument("--silent", action="store_true")
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
+    # TODO: implement lr scheduler
     lr = args.lr
     wd = args.wd
-    num_epochs = args.epochs
+    train_steps = args.train_steps
+    eval_steps = args.eval_steps
+    eval_interval = args.eval_interval
     save_checkpoints = args.save_checkpoints
+    silent = args.silent
 
     ### Create logging stuff
     os.makedirs("checkpoints", exist_ok=True)
-    wandb.init(
-        project="tadam",
-        name=f"{model_name}-{optimizer_name}-{lr}" + (f"-{wd}" if args.wd > 0 else ""),
-        config={
-            "model": model_name,
-            "optimizer": optimizer_name,
-            "epochs": num_epochs,
-            "lr": lr,
-            "wd": wd,
-            "batch_size": batch_size,
-            "device": Device.DEFAULT,
-            "beam": os.getenv("BEAM", 0),
-        },
-    )
+    if not silent:
+        wandb.init(
+            project="tadam",
+            name=f"{model_name}-{optimizer_name}-{lr}" + (f"-{wd}" if args.wd > 0 else ""),
+            config={
+                "model": model_name,
+                "optimizer": optimizer_name,
+                "epochs": num_epochs,
+                "lr": lr,
+                "wd": wd,
+                "batch_size": batch_size,
+                "device": Device.DEFAULT,
+                "beam": os.getenv("BEAM", 0),
+            },
+        )
 
     ### Load data
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
-    train_dataset = Dataset(train_tokens)
-    val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
-    val_dataset = Dataset(val_tokens)
-    print(
-        f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and {len(val_tokens)/1e3:.2f}K validation tokens."
-    )
+    # train_dataset = Dataset(train_tokens)
+    eval_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    # val_dataset = Dataset(val_tokens)
+    if not silent:
+        print(
+            f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
+            f"{len(eval_tokens)/1e3:.2f}K validation tokens."
+        )
 
     ### Create model and optimizer
     assert 1 <= ctx_len <= block_size
@@ -180,81 +224,74 @@ def train():
                 raise ValueError(f"Unknown optimizer name: {optimizer_name}")
         optimizer = nn.optim.OptimizerGroup(first_optimizer, GenericAdam(non_norm_params, lr=lr, weight_decay=0))
 
-    total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
-    ic(total_number_trainable_parameters, norm_params, non_norm_params)
+    if not silent:
+        total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
+        ic(total_number_trainable_parameters, norm_params, non_norm_params)
 
     ### Training loop
     @TinyJit
     def training_step(x, y):
-        logits = model(x)
-        loss = logits.sparse_categorical_crossentropy(y)
-        optimizer.zero_grad()
+        loss = model(x).sparse_categorical_crossentropy(y)
+        optimizer.zero_grad()  # TODO: move somewhere else to optimize memory?
         loss.backward()
         return loss.realize(*optimizer.schedule_step())
 
     @TinyJit
     def eval_step(x, y):
-        logits = model(x)
-        loss = logits.sparse_categorical_crossentropy(y)
-        return loss.realize(*(norm_params + non_norm_params))  # TODO ???
+        return model(x).sparse_categorical_crossentropy(y).realize(*(norm_params + non_norm_params))
 
-    best_val_loss = float("inf")
-    train_losses_per_step = []
-    print("Starting training...\n=================\n")
-    for epoch in range(1, 1 + num_epochs):
-        # Training step
-        with Tensor.train():
-            batch_cnt = 0
-            running_loss = 0
-            for x, y in (pbar := tqdm(train_dataset, unit="steps")):
-                GlobalCounters.reset()
-                batch_cnt += 1
-                t0 = time.perf_counter()
-                loss = training_step(x.contiguous(), y.contiguous())
-                Device[Device.DEFAULT].synchronize()
-                running_loss += loss.item()
-                step_runtime_s = time.perf_counter() - t0
-                step_runtime_ms = step_runtime_s * 1000
-                tflops = GlobalCounters.global_ops / step_runtime_s / 1e12
-                train_losses_per_step.append(loss.item())
-                ktok_per_s = batch_size * ctx_len / step_runtime_s / 1e3
-                wandb.log(
-                    {
-                        "train_loss": loss.item(),
-                        "epoch": epoch,
-                        "performance/ktok_per_s": ktok_per_s,
-                        "performance/step_runtime_ms": step_runtime_ms,
-                        "performance/TFLOPS": tflops,
-                    }
-                )
-                pbar.desc = (
-                    f"train loss: {loss.item():.4f}, step time: {step_runtime_ms:.4f}ms, "
-                    f"{ktok_per_s:.2f} tok/s, {tflops:.2f} TFLOPS "
-                )
-            avg_train_loss = running_loss / batch_cnt
+    best_eval_loss = float("inf")
+    if not silent:
+        print("Starting training...\n=================\n")
+    for step in (pbar := tqdm(range(train_steps), unit="steps")):
+        # TODO: implement lr scheduler
 
         # Evaluation step
-        with Tensor.test():
-            batch_cnt = 0
-            running_loss = 0
-            for x, y in (pbar := tqdm(val_dataset, unit="steps")):
-                batch_cnt += 1
-                loss = eval_step(x.contiguous(), y.contiguous())
+        if step % eval_interval == 0 and not skip_eval:
+            # compute loss over a few batches in the train and eval datasets
+            t0 = time.perf_counter()
+            with Tensor.test():
+                eval_loss = sum(eval_step(*get_batch(eval_tokens)).item() for _ in range(eval_steps)) / eval_steps
                 Device[Device.DEFAULT].synchronize()
-                running_loss += loss.item()
-                pbar.desc = f"val_loss: {loss.item():.4f} "
-            avg_eval_loss = running_loss / batch_cnt
-
-        wandb.log({"val_loss": avg_eval_loss})
-        print(f"Epoch {epoch:2} | avg train loss: {avg_train_loss:.4f} | avg val loss: {avg_eval_loss:.4f}")
-
-        # Save checkpoint
-        if save_checkpoints and avg_eval_loss < best_val_loss:
-            best_val_loss = avg_eval_loss
-            nn.state.safe_save(
-                get_state_dict(model),
-                f"checkpoints/best_{model_name}.safetensors",
+            eval_runtime = time.perf_counter() - t0
+            wandb.log(
+                {
+                    "performance/eval_time_ms": 1000 * eval_runtime,
+                    "eval_loss": eval_loss,
+                }
             )
+            # Save checkpoint
+            if save_checkpoints and eval_loss < best_eval_loss:
+                best_eval_loss = eval_loss
+                nn.state.safe_save(
+                    get_state_dict(model),
+                    f"checkpoints/best_{model_name}.safetensors",
+                )
+
+        # Training step
+        x, y = get_batch(train_tokens)
+        GlobalCounters.reset()
+        t0 = time.perf_counter()
+        with Tensor.train():
+            loss = training_step(x, y).item()
+            optimizer.zero_grad()
+            Device[Device.DEFAULT].synchronize()
+        step_runtime_s = time.perf_counter() - t0
+        step_runtime_ms = 1000 * step_runtime_s
+        tflops = GlobalCounters.global_ops / step_runtime_s / 1e12
+        ktok_per_s = batch_size * ctx_len / step_runtime_s / 1e3
+        wandb.log(
+            {
+                "train_loss": loss,
+                "performance/ktok_per_s": ktok_per_s,
+                "performance/step_runtime_ms": step_runtime_ms,
+                "performance/TFLOPS": tflops,
+            }
+        )
+        pbar.desc = (
+            f"train loss: {loss:.4f}, step time: {step_runtime_ms:.4f}ms, "
+            f"{ktok_per_s:.2f} tok/s, {tflops:.2f} TFLOPS "
+        )
 
 
 def inference():
@@ -284,8 +321,9 @@ def inference():
 
 
 def download_dataset():
-    import requests
     import os
+
+    import requests
 
     if not os.path.exists("data"):
         os.makedirs("data")

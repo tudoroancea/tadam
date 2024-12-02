@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 from tinygrad import Tensor, nn
+
 from tadam.utils import load_state_dict
 
 __all__ = ["GPTConfig", "GPT"]
@@ -83,6 +85,7 @@ class GPT:
         B, T = idx.shape
         pos = Tensor.arange(0, T)
         tok_emb = self.wte(idx)  # token embeddings of shape (B, T, n_embd)
+        # TODO: implement RoPE
         pos_emb = self.wpe(pos)  # position embeddings of shape (T, n_embd)
         x = tok_emb + pos_emb
         x = self.ln_f(x.sequential(self.h))

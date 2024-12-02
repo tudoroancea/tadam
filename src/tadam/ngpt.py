@@ -159,6 +159,7 @@ class NGPT:
         B, T = idx.shape
         pos = Tensor.arange(0, T)
         tok_emb = self.wte(idx)  # token embeddings of shape (B, T, n_embd)
+        # TODO: implement RoPE
         pos_emb = self.wpe(pos)  # position embeddings of shape (T, n_embd)
         x: Tensor = tok_emb + pos_emb
         x = x.sequential(self.h)
