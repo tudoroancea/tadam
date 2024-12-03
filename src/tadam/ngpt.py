@@ -35,6 +35,7 @@ class NGPTConfig:
 class NormalizedLinear:
     def __init__(self, in_features: int, out_features: int):
         bound = 1 / math.sqrt(in_features)
+        # TODO: check initialization
         self.weight = normalize(Tensor.uniform(out_features, in_features, low=-bound, high=bound))
         # Set special attribute to indicate the weights are supposed to be normalized after each optimization step.
         self.weight.__normalized__ = True
@@ -115,10 +116,11 @@ class Block:
         return x
 
 
-class Embedding:
+class NormalizedEmbedding:
     def __init__(self, vocab_size: int, embed_size: int):
         self.vocab_sz = vocab_size
         self.embed_sz = embed_size
+        # TODO: check initialization
         self.weight = normalize(Tensor.glorot_uniform(vocab_size, embed_size))
         # Set special attribute to indicate the weights are supposed to be normalized after each optimization step.
         self.weight.__normalized__ = True
@@ -141,17 +143,17 @@ class NGPT:
             weights_path: path to the weights file to load the model from
         """
         self.vocab_size, self.block_size, self.head_size = config.vocab_size, config.block_size, config.head_size
-        self.wte = Embedding(config.padded_vocab_size, config.n_embd)
+        self.wte = NormalizedEmbedding(config.padded_vocab_size, config.n_embd)
         self.h = [Block(config) for _ in range(config.n_layer)]
-        self.lm_head = NormalizedLinear(config.n_embd, config.padded_vocab_size)
+        self.out_proj = NormalizedLinear(config.n_embd, config.padded_vocab_size)
         self.s_z = Scale(
             config.padded_vocab_size,
             init=1.0,
             scale=1.0 / math.sqrt(config.padded_vocab_size),
         )
         # weight tying (https://paperswithcode.com/method/weight-tying)
-        assert self.wte.weight.shape == self.lm_head.weight.shape
-        self.wte.weight = self.lm_head.weight
+        assert self.wte.weight.shape == self.out_proj.weight.shape
+        self.wte.weight = self.out_proj.weight
         # load weights
         if weights_path is not None:
             load_state_dict(self, nn.state.safe_load(weights_path))
@@ -163,7 +165,7 @@ class NGPT:
         x = tok_emb
         for layer in self.h:
             x = layer(x, rope_cache)  # B, C, E
-        logits = self.lm_head(x) * self.s_z()
+        logits = self.out_proj(x) * self.s_z()
         logits = logits[:, :, : self.vocab_size]  # B, C, V
         return logits
 

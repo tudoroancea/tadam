@@ -4,7 +4,6 @@ from tinygrad import Tensor, GlobalCounters
 from tinygrad.helpers import tqdm, Timing
 from tinygrad.multi import MultiLazyBuffer
 
-DEBUG = int(getenv("DEBUG", 0))
 
 __all__ = ["norm", "normalize"]
 
@@ -72,6 +71,7 @@ def load_state_dict(model, state_dict: dict[str, Tensor], strict=True, verbose=T
         f"{(GlobalCounters.mem_used-start_mem_used)/et_ns:.2f} GB/s",
     ):  # noqa: E501
         model_state_dict = get_state_dict(model)
+        DEBUG = int(getenv("DEBUG", 0))
         if DEBUG >= 1 and len(state_dict) > len(model_state_dict):
             print("WARNING: unused weights in state_dict", sorted(list(state_dict.keys() - model_state_dict.keys())))
         for k, v in (t := tqdm(model_state_dict.items())):
