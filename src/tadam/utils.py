@@ -89,3 +89,31 @@ def load_state_dict(model, state_dict: dict[str, Tensor], strict=True, verbose=T
                 v.replace(state_dict[k].to(v.device)).realize()
             if consume:
                 del state_dict[k]
+
+
+#  https://github.com/black-forest-labs/flux/blob/main/src/flux/math.py
+def compute_rope_cache(pos: Tensor, dim: int, theta: int = 10000) -> Tensor:
+    """Compute cos and sin freqs for RoPE."""
+    assert dim % 2 == 0
+    scale = Tensor.arange(0, dim, 2) / dim  # d = D/2
+    omega = 1.0 / (theta**scale)
+    # pos = Tensor.arange(C)
+    out = Tensor.einsum("n,d->nd", pos, omega)  # could be accomplished with simple broadcasting
+    return Tensor.stack(out.cos(), out.sin(), dim=-1)  # C,D/2,2
+
+
+def apply_rope(q: Tensor, k: Tensor, rope_cache: Tensor) -> tuple[Tensor, Tensor]:
+    qshaped = q.reshape(*q.shape[:-1], -1, 2)  # B,H,C,D/2,2
+    kshaped = k.reshape(*k.shape[:-1], -1, 2)  # B,H,C,D/2,2
+    rope_cache = rope_cache.reshape(1, 1, *rope_cache.shape)  # 1,1,C,D/2,2
+    q_out = Tensor.stack(
+        qshaped[..., 0] * rope_cache[..., 0] - qshaped[..., 1] * rope_cache[..., 1],
+        qshaped[..., 0] * rope_cache[..., 1] + qshaped[..., 1] * rope_cache[..., 0],
+        dim=-1,
+    )
+    k_out = Tensor.stack(
+        kshaped[..., 0] * rope_cache[..., 0] - kshaped[..., 1] * rope_cache[..., 1],
+        kshaped[..., 0] * rope_cache[..., 1] + kshaped[..., 1] * rope_cache[..., 0],
+        dim=-1,
+    )
+    return q_out.reshape(*q.shape), k_out.reshape(*k.shape)

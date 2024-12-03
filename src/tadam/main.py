@@ -19,7 +19,6 @@ from tadam.utils import get_state_dict
 Tensor.manual_seed(127)
 
 ### hyper-parameters
-skip_eval = True
 # model
 block_size: int = 128
 vocab_size: int = 50257
@@ -150,6 +149,7 @@ def train():
     parser.add_argument("--wd", type=float, default=1e-1)
     parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--silent", action="store_true")
+    parser.add_argument("--skip_eval", action="store_true")
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
@@ -165,6 +165,7 @@ def train():
     wd = args.wd
     save_checkpoints = args.save_checkpoints
     silent = args.silent
+    skip_eval = args.skip_eval
 
     ### Create logging stuff
     os.makedirs("checkpoints", exist_ok=True)
