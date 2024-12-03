@@ -9,6 +9,7 @@ from icecream import ic
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
+from tinygrad.nn.optim import OptimizerGroup
 import wandb
 from tadam.gpt import GPT, GPTConfig
 from tadam.ngpt import NGPT, NGPTConfig
@@ -18,19 +19,16 @@ from tadam.utils import get_state_dict
 Tensor.manual_seed(127)
 
 ### hyper-parameters
-skip_eval = False
+skip_eval = True
 # model
 block_size: int = 128
 vocab_size: int = 50257
 padded_vocab_size: int = 50304
-n_layer: int = 2
-n_head: int = 4
-n_embd: int = 128
+n_layer: int = 6
+n_head: int = 6
+n_embd: int = 384
 # training
 ctx_len: int = 128
-batch_size: int = 64
-num_epochs: int = 50
-lr = 1e-3
 
 
 def get_model(model_name: str, checkpoint: str | None = None):
@@ -86,35 +84,25 @@ def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], 
     return norm_state_dict, non_norm_state_dict
 
 
-class Dataset:
-    """
-    one seq:
+# class Dataset:
+#     def __init__(self, toks: Tensor, random_order: bool = True):
+#         self.toks = toks
+#         self.random_order = random_order
+#         self.indices = self._gen_indices()
+#     def __len__(self):
+#         return self.toks.shape[0] // (batch_size * ctx_len + 1)
+#     def _gen_indices(self):
+#         return np.random.permutation(len(self)) if self.random_order else np.arange(len(self))
+#     def __iter__(self):
+#         Tensor.randint(0, len(self), out=self.indices)
+#         self.indices = self._gen_indices()
+#         for idx in self.indices:
+#             i = int(idx * (batch_size * ctx_len + 1))
+#             x = self.toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
+#             y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
 
 
-    """
-
-    def __init__(self, toks: Tensor, random_order: bool = True):
-        self.toks = toks
-        self.random_order = random_order
-        self.indices = self._gen_indices()
-
-    def __len__(self):
-        return self.toks.shape[0] // (batch_size * ctx_len + 1)
-
-    def _gen_indices(self):
-        return np.random.permutation(len(self)) if self.random_order else np.arange(len(self))
-
-    def __iter__(self):
-        Tensor.randint(0, len(self), out=self.indices)
-        self.indices = self._gen_indices()
-        for idx in self.indices:
-            i = int(idx * (batch_size * ctx_len + 1))
-            x = self.toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
-            y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
-            yield x, y
-
-
-def get_batch(toks: Tensor):
+def get_batch(toks: Tensor, batch_size: int):
     idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
     x = toks[idx + Tensor.arange(ctx_len)].contiguous()
     y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
@@ -152,22 +140,29 @@ def train():
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--optimizer", type=str, default="adam")
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--wd", type=float, default=0.0)
-    parser.add_argument("--train_steps", type=int, default=100)
-    parser.add_argument("--eval_steps", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--train_steps", type=int, default=5000)
+    parser.add_argument("--eval_steps", type=int, default=20)
     parser.add_argument("--eval_interval", type=int, default=200)
+    parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--max_lr", type=float, default=1e-3)
+    parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--wd", type=float, default=1e-1)
     parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--silent", action="store_true")
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
-    # TODO: implement lr scheduler
-    lr = args.lr
-    wd = args.wd
+    batch_size = args.batch_size
     train_steps = args.train_steps
     eval_steps = args.eval_steps
     eval_interval = args.eval_interval
+    warmup_steps = args.warmup_steps
+    max_lr = args.max_lr
+    min_lr = args.min_lr
+    if min_lr is None:
+        min_lr = max_lr / 10  # as per Chinchilla
+    wd = args.wd
     save_checkpoints = args.save_checkpoints
     silent = args.silent
 
@@ -176,12 +171,17 @@ def train():
     if not silent:
         wandb.init(
             project="tadam",
-            name=f"{model_name}-{optimizer_name}-{lr}" + (f"-{wd}" if args.wd > 0 else ""),
+            # TODO: rework experiment name
+            name=f"{model_name}-{optimizer_name}-{max_lr}" + (f"-{wd}" if args.wd > 0 else ""),
             config={
                 "model": model_name,
                 "optimizer": optimizer_name,
-                "epochs": num_epochs,
-                "lr": lr,
+                "train_steps": train_steps,
+                "eval_steps": eval_steps,
+                "eval_interval": eval_interval,
+                "warmup_steps": warmup_steps,
+                "max_lr": max_lr,
+                "min_lr": min_lr,
                 "wd": wd,
                 "batch_size": batch_size,
                 "device": Device.DEFAULT,
@@ -210,19 +210,19 @@ def train():
     if model_name == "gpt":
         assert len(norm_params) == 0
         assert optimizer_name == "adam"
-        optimizer = GenericAdam(non_norm_params, lr=lr, weight_decay=wd)
+        optimizer = GenericAdam(non_norm_params, lr=0, weight_decay=wd)
     elif model_name == "ngpt":
         assert len(norm_params) > 0
         match optimizer_name:
             case "adam":
-                first_optimizer = GenericAdam(norm_params, lr=lr, weight_decay=0)
+                first_optimizer = GenericAdam(norm_params, lr=0, weight_decay=0)
             case "intermediate_adam":
-                first_optimizer = IntermediateAdam(norm_params, lr=lr, weight_decay=0)
+                first_optimizer = IntermediateAdam(norm_params, lr=0, weight_decay=0)
             case "cayley":
-                first_optimizer = CayleyAdam(norm_params, lr=lr, weight_decay=0)
+                first_optimizer = CayleyAdam(norm_params, lr=0, weight_decay=0)
             case _:
                 raise ValueError(f"Unknown optimizer name: {optimizer_name}")
-        optimizer = nn.optim.OptimizerGroup(first_optimizer, GenericAdam(non_norm_params, lr=lr, weight_decay=0))
+        optimizer = nn.optim.OptimizerGroup(first_optimizer, GenericAdam(non_norm_params, lr=0, weight_decay=0))
 
     if not silent:
         total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
@@ -232,7 +232,6 @@ def train():
     @TinyJit
     def training_step(x, y):
         loss = model(x).sparse_categorical_crossentropy(y)
-        optimizer.zero_grad()  # TODO: move somewhere else to optimize memory?
         loss.backward()
         return loss.realize(*optimizer.schedule_step())
 
@@ -243,15 +242,15 @@ def train():
     best_eval_loss = float("inf")
     if not silent:
         print("Starting training...\n=================\n")
-    for step in (pbar := tqdm(range(train_steps), unit="steps")):
-        # TODO: implement lr scheduler
-
+    for step in (pbar := range(train_steps) if silent else tqdm(range(train_steps), unit="steps")):
         # Evaluation step
         if step % eval_interval == 0 and not skip_eval:
             # compute loss over a few batches in the train and eval datasets
             t0 = time.perf_counter()
             with Tensor.test():
-                eval_loss = sum(eval_step(*get_batch(eval_tokens)).item() for _ in range(eval_steps)) / eval_steps
+                eval_loss = (
+                    sum(eval_step(*get_batch(eval_tokens, batch_size)).item() for _ in range(eval_steps)) / eval_steps
+                )
                 Device[Device.DEFAULT].synchronize()
             eval_runtime = time.perf_counter() - t0
             wandb.log(
@@ -268,30 +267,51 @@ def train():
                     f"checkpoints/best_{model_name}.safetensors",
                 )
 
+        # LR schedule
+        if step < warmup_steps:
+            # LR warmup
+            lr = max_lr * (step / warmup_steps)
+        else:
+            # Cosine annealing
+            decay_ratio = (step - warmup_steps) / (train_steps - warmup_steps)
+            assert 0.0 <= decay_ratio <= 1.0
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+            lr = min_lr + coeff * (max_lr - min_lr)
+        if isinstance(optimizer, OptimizerGroup):
+            for subopti in optimizer.optimizers:
+                subopti.lr[0] = lr
+        else:
+            optimizer.lr[0] = lr
+
         # Training step
-        x, y = get_batch(train_tokens)
+        x, y = get_batch(train_tokens, batch_size)
         GlobalCounters.reset()
         t0 = time.perf_counter()
         with Tensor.train():
-            loss = training_step(x, y).item()
+            train_loss = training_step(x, y).item()
             optimizer.zero_grad()
             Device[Device.DEFAULT].synchronize()
         step_runtime_s = time.perf_counter() - t0
         step_runtime_ms = 1000 * step_runtime_s
         tflops = GlobalCounters.global_ops / step_runtime_s / 1e12
         ktok_per_s = batch_size * ctx_len / step_runtime_s / 1e3
-        wandb.log(
-            {
-                "train_loss": loss,
-                "performance/ktok_per_s": ktok_per_s,
-                "performance/step_runtime_ms": step_runtime_ms,
-                "performance/TFLOPS": tflops,
-            }
-        )
-        pbar.desc = (
-            f"train loss: {loss:.4f}, step time: {step_runtime_ms:.4f}ms, "
-            f"{ktok_per_s:.2f} tok/s, {tflops:.2f} TFLOPS "
-        )
+        memory_gb = GlobalCounters.mem_used / 1e9
+
+        # Logging
+        if not silent:
+            wandb.log(
+                {
+                    "lr": lr,
+                    "train_loss": train_loss,
+                    "performance/ktok_per_s": ktok_per_s,
+                    "performance/step_runtime_ms": step_runtime_ms,
+                    "performance/TFLOPS": tflops,
+                }
+            )
+            pbar.desc = (
+                f"train loss: {train_loss:.4f}, step time: {step_runtime_ms:.4f}ms, "
+                f"{ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
+            )
 
 
 def inference():
