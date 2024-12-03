@@ -24,20 +24,19 @@ class GPTConfig:
 
 class MultiHeadAttention:
     def __init__(self, config: GPTConfig):
-        n_embd = config.n_embd
-        self.n_head = config.n_head
+        self.head_size = config.head_size
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         # output projection
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
     def __call__(self, x: Tensor, rope_cache: Tensor):
-        B, C, E = x.shape  # batch, ctx_len, n_embd
+        B, C, E, D = *x.shape, self.head_size  # batch, ctx_len, n_embd, head_size
 
         q, k, v = self.c_attn(x).split(E, dim=2)  # (B, C, E)
-        k = k.rearrange("B C (H D) -> B H C D", H=self.n_head)
-        q = q.rearrange("B C (H D) -> B H C D", H=self.n_head)
-        v = v.rearrange("B C (H D) -> B H C D", H=self.n_head)
+        k = k.rearrange("B C (H D) -> B H C D", D=D)
+        q = q.rearrange("B C (H D) -> B H C D", D=D)
+        v = v.rearrange("B C (H D) -> B H C D", D=D)
 
         q, k = apply_rope(q, k, rope_cache)
         y = q.scaled_dot_product_attention(k, v, is_causal=True)
@@ -75,7 +74,6 @@ class GPT:
     def __init__(self, config: GPTConfig, weights_path: str | None = None):
         self.vocab_size, self.block_size, self.head_size = config.vocab_size, config.block_size, config.head_size
         self.wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
-        # self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.h = [Block(config) for _ in range(config.n_layer)]
         self.ln_f = nn.LayerNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=False)
