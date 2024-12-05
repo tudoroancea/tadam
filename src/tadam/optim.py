@@ -4,6 +4,61 @@ from tadam.utils import normalize
 __all__ = ["GenericAdam", "CayleyAdam"]
 
 
+class Adam(nn.optim.Optimizer):
+    def __init__(
+        self,
+        params: list[Tensor],
+        lr=0.001,
+        beta1=0.9,
+        beta2=0.999,
+        eps=1e-8,
+        weight_decay=0.0,
+    ):
+        super().__init__(params, lr)
+        self.b1, self.b2, self.eps, self.wd = beta1, beta2, eps, weight_decay
+        # beta1^t and beta2^t
+        self.b1_t, self.b2_t = (
+            Tensor.ones(
+                (1,),
+                dtype=params[0].dtype,
+                device=self.device,
+                requires_grad=False,
+            ).contiguous()
+            for _ in [beta1, beta2]
+        )
+        # first moments
+        self.m = [
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
+            for t in self.params
+        ]
+        # second moments
+        self.v = [
+            Tensor.zeros(*t.shape, dtype=t.dtype, device=t.device, requires_grad=False).contiguous()
+            for t in self.params
+        ]
+
+    def _step(self) -> list[Tensor]:
+        self.b1_t *= self.b1
+        self.b2_t *= self.b2
+        for i, p in enumerate(self.params):
+            x = p.detach()
+            assert p.grad is not None
+            g = p.grad
+            if hasattr(p, "__wd__") and self.wd != 0:
+                g = g + self.wd * p.detach()
+            self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g)
+            self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * g.square())
+            up = self.m[i] * (self.v[i] + self.eps).rsqrt()
+            alpha = self.lr * (1.0 - self.b2_t).sqrt() / (1.0 - self.b1_t)
+            if hasattr(p, "__normalized__"):
+                p.assign(normalize(x - project(x, alpha * up)))
+                # p.assign(normalize(x -  alpha * up))
+            else:
+                p.assign(x - alpha * up)
+
+        return [self.b1_t, self.b2_t] + self.m + self.v
+
+
 class SkewSymmetricRepresentantion:
     def __init__(self, x: Tensor, u: Tensor):
         self.x = x  # (..., n)

@@ -9,78 +9,31 @@ from icecream import ic
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
-from tinygrad.nn.optim import OptimizerGroup
 import wandb
-from tadam.gpt import GPT, GPTConfig
-from tadam.ngpt import NGPT, NGPTConfig
-from tadam.optim import CayleyAdam, GenericAdam, IntermediateAdam
-from tadam.utils import get_state_dict
+from tadam.model import GPT, GPTConfig
+from tadam.optim import Adam, IntermediateAdam, CayleyAdam
 
 Tensor.manual_seed(127)
 
-### hyper-parameters
-# model
-block_size: int = 128
-vocab_size: int = 50257
-padded_vocab_size: int = 50304
-n_layer: int = 6
-n_head: int = 6
-n_embd: int = 384
-# training
-ctx_len: int = 128
 
-
-def get_model(model_name: str, checkpoint: str | None = None):
-    match model_name:
-        case "gpt":
-            return GPT(
-                GPTConfig(block_size, vocab_size, padded_vocab_size, n_layer, n_head, n_embd),
-                checkpoint,
-            )
-        case "ngpt":
-            return NGPT(
-                NGPTConfig(
-                    block_size,
-                    vocab_size,
-                    padded_vocab_size,
-                    n_layer,
-                    n_head,
-                    n_embd,
-                    1 / n_layer,
-                    1 / math.sqrt(n_embd),
-                    1.0,
-                    1 / math.sqrt(n_embd),
-                    1.0,
-                    1.0,
-                    1.0,
-                    1 / math.sqrt(n_embd),
-                ),
-                checkpoint,
-            )
-        case _:
-            raise ValueError(f"Unknown model name: {model_name}")
-
-
-def split_parameters(params: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
-    # split parameters into two groups: those that need to be normalized and those that don't
-    norm_params, non_norm_params = [], []
-    for p in params:
-        if hasattr(p, "__normalized__"):
-            norm_params.append(p)
-        else:
-            non_norm_params.append(p)
-    return norm_params, non_norm_params
-
-
-def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    # split state_dict into two groups: those that need to be normalized and those that don't
-    norm_state_dict, non_norm_state_dict = {}, {}
-    for k, v in state_dict.items():
-        if hasattr(v, "__normalized__"):
-            norm_state_dict[k] = v
-        else:
-            non_norm_state_dict[k] = v
-    return norm_state_dict, non_norm_state_dict
+# def split_parameters(params: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+#     # split parameters into two groups: those that need to be normalized and those that don't
+#     norm_params, non_norm_params = [], []
+#     for p in params:
+#         if hasattr(p, "__normalized__"):
+#             norm_params.append(p)
+#         else:
+#             non_norm_params.append(p)
+#     return norm_params, non_norm_params
+# def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+#     # split state_dict into two groups: those that need to be normalized and those that don't
+#     norm_state_dict, non_norm_state_dict = {}, {}
+#     for k, v in state_dict.items():
+#         if hasattr(v, "__normalized__"):
+#             norm_state_dict[k] = v
+#         else:
+#             non_norm_state_dict[k] = v
+#     return norm_state_dict, non_norm_state_dict
 
 
 # class Dataset:
@@ -101,7 +54,7 @@ def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], 
 #             y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
 
 
-def get_batch(toks: Tensor, batch_size: int):
+def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
     idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
     x = toks[idx + Tensor.arange(ctx_len)].contiguous()
     y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
@@ -134,11 +87,20 @@ def model_name_parser() -> str:
     return parser.parse_args().model
 
 
+# def beam():
+#     parser = ArgumentParser()
+#     parser.add_argument("--model", type=str, default="gpt")
+#     parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
+#     parser.add_argument("--optimizer", type=str, default="adam")
+#     parser.add_argument("--wd", type=float, default=1e-1)
+
+
 def train():
     ### Parse cli arguments
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--train_steps", type=int, default=5000)
     parser.add_argument("--eval_steps", type=int, default=20)
@@ -153,6 +115,7 @@ def train():
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
+    ctx_len = args.ctx_len
     batch_size = args.batch_size
     train_steps = args.train_steps
     eval_steps = args.eval_steps
@@ -202,32 +165,27 @@ def train():
         )
 
     ### Create model and optimizer
-    assert 1 <= ctx_len <= block_size
-    model = get_model(model_name)
-    state_dict = get_state_dict(model)
-    norm_params, non_norm_params = split_state_dict(state_dict)
-    norm_params = list(norm_params.values())
-    non_norm_params = list(non_norm_params.values())
-    if model_name == "gpt":
-        assert len(norm_params) == 0
-        assert optimizer_name == "adam"
-        optimizer = GenericAdam(non_norm_params, lr=0, weight_decay=wd)
-    elif model_name == "ngpt":
-        assert len(norm_params) > 0
-        match optimizer_name:
-            case "adam":
-                first_optimizer = GenericAdam(norm_params, lr=0, weight_decay=0)
-            case "intermediate_adam":
-                first_optimizer = IntermediateAdam(norm_params, lr=0, weight_decay=0)
-            case "cayley":
-                first_optimizer = CayleyAdam(norm_params, lr=0, weight_decay=0)
-            case _:
-                raise ValueError(f"Unknown optimizer name: {optimizer_name}")
-        optimizer = nn.optim.OptimizerGroup(first_optimizer, GenericAdam(non_norm_params, lr=0, weight_decay=0))
+    config = GPTConfig(ngpt=model_name == "ngpt", n_layer=6)
+    assert 1 <= ctx_len <= config.block_size
+    model = GPT(config)
+    state_dict = nn.state.get_state_dict(model)
+    params = list(state_dict.values())
+    match optimizer_name:
+        case "adam":
+            optimizer = Adam(params, lr=0, weight_decay=wd)
+        case "intermediate_adam":
+            raise NotImplementedError
+            optimizer = IntermediateAdam(params, lr=0, weight_decay=wd)
+        case "cayley":
+            raise NotImplementedError
+            optimizer = CayleyAdam(params, lr=0, weight_decay=wd)
+        case _:
+            raise ValueError(f"Unknown optimizer name: {optimizer_name}")
 
     if not silent:
+        params_dict = {k: v for k, v in state_dict.items() if v.requires_grad}
         total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
-        ic(total_number_trainable_parameters, norm_params, non_norm_params)
+        ic(params_dict, total_number_trainable_parameters)
 
     ### Training loop
     @TinyJit
@@ -238,7 +196,7 @@ def train():
 
     @TinyJit
     def eval_step(x, y):
-        return model(x).sparse_categorical_crossentropy(y).realize(*(norm_params + non_norm_params))
+        return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
 
     best_eval_loss = float("inf")
     if not silent:
@@ -250,7 +208,8 @@ def train():
             t0 = time.perf_counter()
             with Tensor.test():
                 eval_loss = (
-                    sum(eval_step(*get_batch(eval_tokens, batch_size)).item() for _ in range(eval_steps)) / eval_steps
+                    sum(eval_step(*get_batch(eval_tokens, batch_size, ctx_len)).item() for _ in range(eval_steps))
+                    / eval_steps
                 )
                 Device[Device.DEFAULT].synchronize()
             eval_runtime = time.perf_counter() - t0
@@ -264,7 +223,7 @@ def train():
             if save_checkpoints and eval_loss < best_eval_loss:
                 best_eval_loss = eval_loss
                 nn.state.safe_save(
-                    get_state_dict(model),
+                    nn.state.get_state_dict(model),
                     f"checkpoints/best_{model_name}.safetensors",
                 )
 
@@ -278,14 +237,10 @@ def train():
             assert 0.0 <= decay_ratio <= 1.0
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
             lr = min_lr + coeff * (max_lr - min_lr)
-        if isinstance(optimizer, OptimizerGroup):
-            for subopti in optimizer.optimizers:
-                subopti.lr[0] = lr
-        else:
-            optimizer.lr[0] = lr
+        optimizer.lr[0] = lr
 
         # Training step
-        x, y = get_batch(train_tokens, batch_size)
+        x, y = get_batch(train_tokens, batch_size, ctx_len)
         GlobalCounters.reset()
         t0 = time.perf_counter()
         with Tensor.train():
