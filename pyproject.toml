@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 download_dataset = "tadam.main:download_dataset"
 train = "tadam.main:train"
+beam = "tadam.main:beam"
 inference = "tadam.main:inference"
 
 [build-system]

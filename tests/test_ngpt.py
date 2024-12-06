@@ -3,23 +3,17 @@ import pytest
 from icecream import ic
 from tinygrad import Tensor, nn
 
-from tadam.ngpt import NGPT, NGPTConfig, norm
+from tadam.utils import norm
+from tadam.model import GPTConfig, GPT
 
 
 @pytest.fixture
-def config() -> NGPTConfig:
-    return NGPTConfig(
-        block_size=64,
-        vocab_size=512,
-        padded_vocab_size=512,
-        n_layer=2,
-        n_head=4,
-        n_embd=64,
-    )
+def config() -> GPTConfig:
+    return GPTConfig()
 
 
 def test_forward_pass(config):
-    model = NGPT(config)
+    model = GPT(config)
     ctx_len = 8
     batch_size = 4
     x = Tensor.randint(

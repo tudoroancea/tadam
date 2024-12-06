@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 import numpy as np
 import tiktoken
 from icecream import ic
-from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
+from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn, Context  # type: ignore
 from tinygrad.helpers import tqdm
 
 import wandb
@@ -14,44 +14,6 @@ from tadam.model import GPT, GPTConfig
 from tadam.optim import Adam, IntermediateAdam, CayleyAdam
 
 Tensor.manual_seed(127)
-
-
-# def split_parameters(params: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
-#     # split parameters into two groups: those that need to be normalized and those that don't
-#     norm_params, non_norm_params = [], []
-#     for p in params:
-#         if hasattr(p, "__normalized__"):
-#             norm_params.append(p)
-#         else:
-#             non_norm_params.append(p)
-#     return norm_params, non_norm_params
-# def split_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-#     # split state_dict into two groups: those that need to be normalized and those that don't
-#     norm_state_dict, non_norm_state_dict = {}, {}
-#     for k, v in state_dict.items():
-#         if hasattr(v, "__normalized__"):
-#             norm_state_dict[k] = v
-#         else:
-#             non_norm_state_dict[k] = v
-#     return norm_state_dict, non_norm_state_dict
-
-
-# class Dataset:
-#     def __init__(self, toks: Tensor, random_order: bool = True):
-#         self.toks = toks
-#         self.random_order = random_order
-#         self.indices = self._gen_indices()
-#     def __len__(self):
-#         return self.toks.shape[0] // (batch_size * ctx_len + 1)
-#     def _gen_indices(self):
-#         return np.random.permutation(len(self)) if self.random_order else np.arange(len(self))
-#     def __iter__(self):
-#         Tensor.randint(0, len(self), out=self.indices)
-#         self.indices = self._gen_indices()
-#         for idx in self.indices:
-#             i = int(idx * (batch_size * ctx_len + 1))
-#             x = self.toks[i : i + batch_size * ctx_len].view(batch_size, ctx_len)
-#             y = self.toks[i + 1 : i + batch_size * ctx_len + 1].view(batch_size, ctx_len)
 
 
 def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
@@ -87,12 +49,47 @@ def model_name_parser() -> str:
     return parser.parse_args().model
 
 
-# def beam():
-#     parser = ArgumentParser()
-#     parser.add_argument("--model", type=str, default="gpt")
-#     parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
-#     parser.add_argument("--optimizer", type=str, default="adam")
-#     parser.add_argument("--wd", type=float, default=1e-1)
+def beam():
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--wd", type=float, default=1e-1)
+    parser.add_argument("--beam", type=int, default=10)
+    parser.add_argument("--debug", type=int, default=2)
+    args = parser.parse_args()
+    model_name = args.model
+    ctx_len = args.ctx_len
+    batch_size = args.batch_size
+    optimizer_name = args.optimizer
+    with Context(DEBUG=args.debug, BEAM=args.beam):
+        config = GPTConfig(ngpt=model_name == "ngpt", n_layer=1)
+        model = GPT(config)
+        state_dict = nn.state.get_state_dict(model)
+        params = list(state_dict.values())
+        match optimizer_name:
+            case "adam":
+                optimizer = Adam(params, lr=1e-3, weight_decay=2)
+            case "intermediate_adam":
+                raise NotImplementedError
+                optimizer = IntermediateAdam(params, lr=1e-3, weight_decay=2)
+            case "cayley":
+                raise NotImplementedError
+                optimizer = CayleyAdam(params, lr=1e-3, weight_decay=2)
+            case _:
+                raise ValueError(f"Unknown optimizer name: {optimizer_name}")
+
+        x = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
+        y = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
+
+        with Tensor.test():
+            return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers), x, y)
+
+        with Tensor.train():
+            loss = model(x).sparse_categorical_crossentropy(y)
+            loss.backward()
+            return loss.realize(*optimizer.schedule_step(), x, y)
 
 
 def train():
@@ -105,7 +102,7 @@ def train():
     parser.add_argument("--train_steps", type=int, default=5000)
     parser.add_argument("--eval_steps", type=int, default=20)
     parser.add_argument("--eval_interval", type=int, default=200)
-    parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--max_lr", type=float, default=1e-3)
     parser.add_argument("--min_lr", type=float, default=None)
     parser.add_argument("--wd", type=float, default=1e-1)
@@ -135,8 +132,7 @@ def train():
     if not silent:
         wandb.init(
             project="tadam",
-            # TODO: rework experiment name
-            name=f"{model_name}-{optimizer_name}-{max_lr}" + (f"-{wd}" if args.wd > 0 else ""),
+            name=f"{model_name}-{optimizer_name}-{max_lr}",
             config={
                 "model": model_name,
                 "optimizer": optimizer_name,
@@ -165,7 +161,7 @@ def train():
         )
 
     ### Create model and optimizer
-    config = GPTConfig(ngpt=model_name == "ngpt", n_layer=6)
+    config = GPTConfig(ngpt=model_name == "ngpt")
     assert 1 <= ctx_len <= config.block_size
     model = GPT(config)
     state_dict = nn.state.get_state_dict(model)
@@ -183,9 +179,9 @@ def train():
             raise ValueError(f"Unknown optimizer name: {optimizer_name}")
 
     if not silent:
-        params_dict = {k: v for k, v in state_dict.items() if v.requires_grad}
+        trainable_params_dict = {k: v for k, v in state_dict.items() if v.requires_grad}
         total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
-        ic(params_dict, total_number_trainable_parameters)
+        ic(trainable_params_dict, total_number_trainable_parameters)
 
     ### Training loop
     @TinyJit
@@ -222,10 +218,9 @@ def train():
             # Save checkpoint
             if save_checkpoints and eval_loss < best_eval_loss:
                 best_eval_loss = eval_loss
-                nn.state.safe_save(
-                    nn.state.get_state_dict(model),
-                    f"checkpoints/best_{model_name}.safetensors",
-                )
+                checkpoint_path = f"checkpoints/best_{model_name}.safetensors"
+                nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
+                wandb.save(checkpoint_path)
 
         # LR schedule
         if step < warmup_steps:
@@ -274,26 +269,53 @@ def inference():
     ### Parse cli arguments
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
-    parser.add_argument("--save_checkpoints", action="store_true")
     model_name = parser.parse_args().model
     ### Load model
-    model = get_model(model_name, checkpoint=f"checkpoints/best_{model_name}.safetensors")
+    config = GPTConfig(ngpt=model_name == "ngpt")
+    model = GPT(config)
     ### Load validation data and tokenizer
     tokenizer = Tokenizer()
-    val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    val_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    # val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
     ### Inference on the first sentence of the validation set
+    # endoftext_positions = np.argwhere(val_tokens.numpy() == tokenizer.encode("<|endoftext|>")[0]).ravel()
+    # input_sentence = val_tokens[int(endoftext_positions[0]) + 1 : int(endoftext_positions[1]) + 1]
+    # expected_output_sentence = val_tokens[int(endoftext_positions[1]) + 1 : int(endoftext_positions[2]) + 1]
+    # print(f"Input sentence: {tokenizer.decode(input_sentence)}")
+    # print(f"Expected output sentence: {tokenizer.decode(expected_output_sentence)}")
+    # with Tensor.test():
+    #     output = model.generate(
+    #         ctx=input_sentence.view(1, -1),
+    #         max_new_tokens=len(expected_output_sentence),
+    #         temperature=1.0,
+    #     )[0]
+    #     print(f"Actual output sentence: {tokenizer.decode(output)}")
+    ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
     endoftext_positions = np.argwhere(val_tokens.numpy() == tokenizer.encode("<|endoftext|>")[0]).ravel()
-    input_sentence = val_tokens[int(endoftext_positions[0]) + 1 : int(endoftext_positions[1]) + 1]
-    expected_output_sentence = val_tokens[int(endoftext_positions[1]) + 1 : int(endoftext_positions[2]) + 1]
-    print(f"Input sentence: {tokenizer.decode(input_sentence)}")
-    print(f"Expected output sentence: {tokenizer.decode(expected_output_sentence)}")
+    start_input = int(endoftext_positions[0]) + 1
+    i = 1
+    while i < len(endoftext_positions) and int(endoftext_positions[i]) - start_input <= config.block_size:
+        i += 1
+    end_input = int(endoftext_positions[i - 1]) + 1
+    start_expected_output = int(endoftext_positions[i]) + 1
+    while i < len(endoftext_positions) and int(endoftext_positions[i]) - start_expected_output <= config.block_size:
+        i += 1
+    end_expected_output = int(endoftext_positions[i - 1]) + 1
+    input = val_tokens[start_input:end_input]
+    expected_output = val_tokens[start_expected_output:end_expected_output]
+    print("############# Input #############")
+    print(tokenizer.decode(input))
+    print("############ Expected output #############")
+    print(tokenizer.decode(expected_output))
+    print("############ Generated  output #############")
     with Tensor.test():
         output = model.generate(
-            ctx=input_sentence.view(1, -1),
-            max_new_tokens=len(expected_output_sentence),
+            ctx=input.view(1, -1),
+            max_new_tokens=len(expected_output),
             temperature=1.0,
-        )[0]
-        print(f"Actual output sentence: {tokenizer.decode(output)}")
+        )[0, len(input) :]
+    print(tokenizer.decode(output))
+    breakpoint()
 
 
 def download_dataset():
