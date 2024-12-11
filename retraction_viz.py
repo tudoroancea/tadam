@@ -53,7 +53,7 @@ def plot_sphere(ax: Axes):
     ax.plot_surface(x, y, z, alpha=0.1)
     # now also plot wireframe
     ax.plot_wireframe(x, y, z, rstride=10, cstride=10, alpha=0.5)
-    # set matpltolib 3d view to elevation 28°, azimuth -74°
+    # set matpltolib 3d view
     ax.view_init(elev=20, azim=16)
 
 

@@ -2,7 +2,7 @@ import functools
 import math
 from dataclasses import dataclass
 
-from tinygrad import Tensor, nn
+from tinygrad import Tensor, dtype, nn
 
 from tadam.utils import normalize
 
@@ -237,10 +237,13 @@ class GPT:
         logits = logits[:, :, : self.config.vocab_size]  # B, C, V
         return logits
 
-    def generate(self, ctx, max_new_tokens, temperature=1.0):
-        for _ in range(max_new_tokens):
-            logits = self(ctx[:, -self.config.block_size :])  # B, C, V
+    def generate(self, ctx: Tensor, max_new_tokens: int, temperature: float = 1.0):
+        ctx_len = ctx.shape[1]
+        ctx = ctx.cat(Tensor.full((1, max_new_tokens), GPTConfig.vocab_size - 1, dtype=dtype.int32))
+        for i in range(max_new_tokens):
+            logits = self(ctx[:, i : i + self.config.block_size])  # B, C, V
             logits = logits[:, -1, :] / temperature
             next_tok = logits.softmax().multinomial()
-            ctx = Tensor.cat(ctx, next_tok, dim=1)
-        return ctx
+            ctx[:, i + self.config.block_size] = next_tok
+            # ctx = Tensor.cat(ctx, next_tok, dim=1)
+        # return ctx[:, self.]
