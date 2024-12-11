@@ -2,7 +2,7 @@ import functools
 import math
 from dataclasses import dataclass
 
-from tinygrad import Tensor, dtype, nn
+from tinygrad import Tensor, dtypes, nn
 
 from tadam.utils import normalize
 
@@ -224,7 +224,7 @@ class GPT:
         if weights_path is not None:
             nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
 
-    def __call__(self, idx: Tensor):
+    def __call__(self, idx: Tensor) -> Tensor:
         _, C = idx.shape
         # token embeddings
         tok_emb = self.wte(idx)  # B, C, E
@@ -238,12 +238,15 @@ class GPT:
         return logits
 
     def generate(self, ctx: Tensor, max_new_tokens: int, temperature: float = 1.0):
-        ctx_len = ctx.shape[1]
-        ctx = ctx.cat(Tensor.full((1, max_new_tokens), GPTConfig.vocab_size - 1, dtype=dtype.int32))
-        for i in range(max_new_tokens):
-            logits = self(ctx[:, i : i + self.config.block_size])  # B, C, V
-            logits = logits[:, -1, :] / temperature
-            next_tok = logits.softmax().multinomial()
-            ctx[:, i + self.config.block_size] = next_tok
-            # ctx = Tensor.cat(ctx, next_tok, dim=1)
-        # return ctx[:, self.]
+        # ctx has shape (B, C)
+        B, C = ctx.shape
+        ctx = ctx.cat(Tensor.full((B, max_new_tokens), GPTConfig.vocab_size - 1, dtype=dtypes.int32), dim=-1)
+        probs = Tensor.rand(B, max_new_tokens, self.config.vocab_size, contiguous=True)
+        for i in range(C, C + max_new_tokens):
+            # run model to obtain logits
+            logits = self(ctx[:, max(0, i - self.config.block_size) : i])  # B, C, V
+            # compute probabilities for each possible token
+            probs[:, i - C] = (logits[:, -1, :] / temperature).softmax()
+            # sample next token from the probabilities
+            ctx[:, i : i + 1] = probs[:, i - C].multinomial()
+        return ctx[:, C:], probs

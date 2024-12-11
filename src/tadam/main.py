@@ -16,13 +16,6 @@ from tadam.optim import Adam, IntermediateAdam, CayleyAdam
 Tensor.manual_seed(127)
 
 
-def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
-    idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
-    x = toks[idx + Tensor.arange(ctx_len)].contiguous()
-    y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
-    return x, y
-
-
 class Tokenizer:
     def __init__(self):
         self.enc = tiktoken.get_encoding("gpt2")
@@ -43,10 +36,12 @@ def load_tokens(data_path: str):
     return Tensor(tokens_np)
 
 
-def model_name_parser() -> str:
-    parser = ArgumentParser()
-    parser.add_argument("--model", type=str, default="gpt")
-    return parser.parse_args().model
+def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
+    # idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
+    idx = Tensor([0]).reshape(-1, 1)
+    x = toks[idx + Tensor.arange(ctx_len)].contiguous()
+    y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
+    return x, y
 
 
 def beam():
@@ -316,6 +311,61 @@ def inference():
         )[0, len(input) :]
     print(tokenizer.decode(output))
     breakpoint()
+
+
+def naive_inference():
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--temp", type=float, default=1.0)
+    args = parser.parse_args()
+    model_name = args.model
+    temp = args.temp
+    ### Load model
+    config = GPTConfig(ngpt=model_name == "ngpt")
+    model = GPT(config)
+    ### Load validation data and tokenizer
+    tokenizer = Tokenizer()
+    train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
+
+    input = train_tokens[: config.block_size]
+    expected_output = train_tokens[config.block_size : config.block_size + 30]
+    print("############# Input #############")
+    print(tokenizer.decode(input))
+    print("############ Expected output #############")
+    print(tokenizer.decode(expected_output))
+    print("############ Generated  output #############")
+    with Tensor.test():
+        output, probs = model.generate(input.view(1, -1), len(expected_output), temp)
+        output = output[0]
+        probs = probs[0].numpy()
+    Device[Device.DEFAULT].synchronize()
+    print(tokenizer.decode(output))
+
+    # plot distribution of logits
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import Slider
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plt.subplots_adjust(bottom=0.25)
+
+    def update(val):
+        ax.clear()
+        time_step = int(slider.val)
+        # ax.hist(probs[time_step], bins=100)
+        ax.step(np.arange(len(probs[time_step])), probs[time_step], where="post")
+        ax.set_title(f"Token Distribution at Step {time_step}")
+        ax.set_xlabel("Probability")
+        ax.set_ylabel("Count")
+        # fig.canvas.draw_idle()
+
+    ax_slider = plt.axes([0.1, 0.1, 0.65, 0.03])
+    slider = Slider(ax_slider, "Time Step", 0, len(probs) - 1, valinit=0, valstep=1)
+    slider.on_changed(update)
+
+    update(0)
+    plt.savefig("distribution.png", dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 def download_dataset():

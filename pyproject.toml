@@ -21,6 +21,7 @@ download_dataset = "tadam.main:download_dataset"
 train = "tadam.main:train"
 beam = "tadam.main:beam"
 inference = "tadam.main:inference"
+naive_inference = "tadam.main:naive_inference"
 
 [build-system]
 requires = ["hatchling"]
