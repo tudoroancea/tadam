@@ -14,6 +14,7 @@ from tadam.model import GPT, GPTConfig
 from tadam.optim import Adam, CayleyAdam, IntermediateAdam
 
 Tensor.manual_seed(127)
+np.random.seed(127)
 
 
 class Tokenizer:
@@ -226,10 +227,12 @@ def inference():
     ### Parse cli arguments
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
-    model_name = parser.parse_args().model
+    parser.add_argument("--temp", type=float, default=1.0)
+    args = parser.parse_args()
+    model_name = args.model
     ### Load model
     config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], block_size=256, n_layer=1)
-    model = GPT(config, "checkpoints/best_gpt.safetensors")
+    model = GPT(config, "checkpoints/final_gpt.safetensors")
     ### Load validation data and tokenizer
     tokens = load_tokens("data/shakespeare_char_train.bin")
     # tokens = load_tokens("data/tiny_shakespeare_val.bin")
@@ -245,11 +248,13 @@ def inference():
     print(tokenizer.decode(expected_output.tolist()))
     print("############ Generated  output #############")
     with Tensor.test():
-        output = model.generate(input.view(1, -1), max_new_tokens, 1.0)[0][0, -max_new_tokens:]
+        output = model.generate(input.view(1, -1), max_new_tokens, args.temp)[0][0, -max_new_tokens:]
     print(tokenizer.decode(output.tolist()))
 
 
 def naive_inference():
+    with open("data/shakespeare_char_meta.pkl", "rb") as f:
+        meta = pickle.load(f)
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--temp", type=float, default=1.0)
@@ -260,22 +265,21 @@ def naive_inference():
     config = GPTConfig(ngpt=model_name == "ngpt")
     model = GPT(config, "checkpoints/final_gpt.safetensors")
     ### Load validation data and tokenizer
-
-    tokenizer = Tokenizer()
-    train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    tokenizer = Tokenizer(meta["itos"], meta["stoi"])
+    tokens = load_tokens("data/shakespeare_char_train.bin")
     ### Check that the entropy is similar to the one observed during the train
     with Tensor.test():
-        x, y = get_batch(train_tokens, 64, config.block_size)
+        x, y = get_batch(tokens, 64, config.block_size)
         entropy = model(x).sparse_categorical_crossentropy(y).numpy()
         ic(entropy)
     ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
-    i = np.random.randint(0, len(train_tokens) - config.block_size)
-    input = train_tokens[i : i + config.block_size]
-    expected_output = train_tokens[i + config.block_size : i + config.block_size + 30]
+    i = np.random.randint(0, len(tokens) - config.block_size)
+    input = tokens[i : i + config.block_size]
+    expected_output = tokens[i + config.block_size : i + config.block_size + 50]
     print("############# Input #############")
-    print(tokenizer.decode(input))
+    print(tokenizer.decode(input.tolist()))
     print("############ Expected output #############")
-    print(tokenizer.decode(expected_output))
+    print(tokenizer.decode(expected_output.tolist()))
     print("############ Generated  output #############")
     with Tensor.test():
         output, probs = model.generate(input.view(1, -1), len(expected_output), temp)

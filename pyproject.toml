@@ -24,6 +24,7 @@ inference = "tadam.main:inference"
 naive_inference = "tadam.main:naive_inference"
 train_char = "tadam.main_char:train"
 inference_char = "tadam.main_char:inference"
+naive_inference_char = "tadam.main_char:naive_inference"
 
 [build-system]
 requires = ["hatchling"]
