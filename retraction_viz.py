@@ -1,6 +1,6 @@
-from icecream import ic
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from icecream import ic
 from matplotlib.axes import Axes
 
 

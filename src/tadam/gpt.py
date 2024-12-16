@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from tinygrad import Tensor, nn
 
-from tadam.utils import compute_rope_cache, load_state_dict, apply_rope
+from tadam.utils import apply_rope, compute_rope_cache, load_state_dict
 
 __all__ = ["GPTConfig", "GPT"]
 

@@ -12,12 +12,15 @@ __all__ = ["GPTConfig", "GPT"]
 @dataclass
 class GPTConfig:
     ngpt: bool = False
-    block_size: int = 128
-    vocab_size: int = 50257
-    padded_vocab_size: int = 50304
+    block_size: int = 256
+    vocab_size: int = 65
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
+
+    @property
+    def padded_vocab_size(self):
+        return 64 * (self.vocab_size // 64 + 1)
 
     @property
     def head_size(self):
@@ -161,10 +164,10 @@ class MLP:
     def __call__(self, x: Tensor) -> Tensor:
         uv = self.c_fc(x)
         if self.config.ngpt:
-            uv = uv * self.s_uv().view(1, 1, -1)
+            uv = uv * self.s_uv().view(1, 1, -1) * math.sqrt(self.config.n_embd)
         u, v = uv.split(uv.shape[-1] // 2, dim=-1)
-        if self.config.ngpt:
-            v = v * math.sqrt(self.config.n_embd)
+        # if self.config.ngpt:
+        #     v = v * math.sqrt(self.config.n_embd)
         return self.c_proj(u * v.silu())
 
 
@@ -214,7 +217,7 @@ class GPT:
             )
         # weight tying (https://paperswithcode.com/method/weight-tying)
         # assert self.wte.weight.shape == self.out_proj.weight.shape
-        # self.wte.weight = self.out_proj.weight
+        self.wte.weight = self.lm_head.weight
 
         # pre-compute rope cache for block_size
         self.rope_cache = compute_rope_cache(Tensor.arange(config.block_size), config.head_size)
@@ -240,7 +243,7 @@ class GPT:
     def generate(self, ctx: Tensor, max_new_tokens: int, temperature: float = 1.0):
         # ctx has shape (B, C)
         B, C = ctx.shape
-        ctx = ctx.cat(Tensor.full((B, max_new_tokens), GPTConfig.vocab_size - 1, dtype=dtypes.int32), dim=-1)
+        ctx = ctx.cat(Tensor.full((B, max_new_tokens), GPTConfig.vocab_size - 1, dtype=dtypes.uint8), dim=-1)
         probs = Tensor.rand(B, max_new_tokens, self.config.vocab_size, contiguous=True)
         for i in range(C, C + max_new_tokens):
             # run model to obtain logits

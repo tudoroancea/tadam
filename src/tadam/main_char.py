@@ -1,12 +1,12 @@
 import math
 import os
+import pickle
 import time
 from argparse import ArgumentParser
 
 import numpy as np
-import tiktoken
 from icecream import ic
-from tinygrad import Context, Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
+from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
 import wandb
@@ -17,74 +17,28 @@ Tensor.manual_seed(127)
 
 
 class Tokenizer:
-    def __init__(self):
-        self.enc = tiktoken.get_encoding("gpt2")
-        self.bos = self.encode("<|endoftext|>")[0]
-        self.eos = self.encode("<|endoftext|>")[0]
+    def __init__(self, itos: dict[int, str], stoi: dict[str, int]):
+        self.itos = itos
+        self.stoi = stoi
 
-    def encode(self, text: str):
-        return self.enc.encode(text, allowed_special={"<|endoftext|>"})
+    def encode(self, s: str) -> list[int]:
+        return [self.stoi[c] for c in s]  # encoder: take a string, output a list of integers
 
-    def decode(self, tokens: list[int] | Tensor):
-        return self.enc.decode(tokens if isinstance(tokens, list) else tokens.tolist())
+    def decode(self, l: list[int]) -> str:
+        return "".join([self.itos[i] for i in l])  # decoder: take a list of integers, output a string
 
 
 def load_tokens(data_path: str):
     with open(data_path, "rb") as f:
-        f.seek(0x400)
-        tokens_np = np.frombuffer(f.read(), dtype=np.uint16).astype(np.int32)
+        tokens_np = np.frombuffer(f.read(), dtype=np.uint8)
     return Tensor(tokens_np)
 
 
 def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
     idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
-    # idx = Tensor([[0]])
     x = toks[idx + Tensor.arange(ctx_len)].contiguous()
     y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
     return x, y
-
-
-def beam():
-    parser = ArgumentParser()
-    parser.add_argument("--model", type=str, default="gpt")
-    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--optimizer", type=str, default="adam")
-    parser.add_argument("--wd", type=float, default=1e-1)
-    parser.add_argument("--beam", type=int, default=10)
-    parser.add_argument("--debug", type=int, default=2)
-    args = parser.parse_args()
-    model_name = args.model
-    ctx_len = args.ctx_len
-    batch_size = args.batch_size
-    optimizer_name = args.optimizer
-    with Context(DEBUG=args.debug, BEAM=args.beam):
-        config = GPTConfig(ngpt=model_name == "ngpt", n_layer=1)
-        model = GPT(config)
-        state_dict = nn.state.get_state_dict(model)
-        params = list(state_dict.values())
-        match optimizer_name:
-            case "adam":
-                optimizer = Adam(params, lr=1e-3, weight_decay=2)
-            case "intermediate_adam":
-                raise NotImplementedError
-                optimizer = IntermediateAdam(params, lr=1e-3, weight_decay=2)
-            case "cayley":
-                raise NotImplementedError
-                optimizer = CayleyAdam(params, lr=1e-3, weight_decay=2)
-            case _:
-                raise ValueError(f"Unknown optimizer name: {optimizer_name}")
-
-        x = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
-        y = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
-
-        with Tensor.test():
-            return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers), x, y)
-
-        with Tensor.train():
-            loss = model(x).sparse_categorical_crossentropy(y)
-            loss.backward()
-            return loss.realize(*optimizer.schedule_step(), x, y)
 
 
 def train():
@@ -145,8 +99,11 @@ def train():
         )
 
     ### Load data
-    train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
-    eval_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    train_tokens = load_tokens("data/shakespeare_char_train.bin")
+    eval_tokens = load_tokens("data/shakespeare_char_val.bin")
+    with open("data/shakespeare_char_meta.pkl", "rb") as f:
+        meta = pickle.load(f)
+    print(meta)
     if not silent:
         print(
             f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
@@ -154,7 +111,7 @@ def train():
         )
 
     ### Create model and optimizer
-    config = GPTConfig(ngpt=model_name == "ngpt")
+    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], n_layer=6)
     assert 1 <= ctx_len <= config.block_size
     model = GPT(config)
     state_dict = nn.state.get_state_dict(model)
@@ -264,56 +221,32 @@ def train():
 
 
 def inference():
+    with open("data/shakespeare_char_meta.pkl", "rb") as f:
+        meta = pickle.load(f)
     ### Parse cli arguments
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     model_name = parser.parse_args().model
     ### Load model
-    config = GPTConfig(ngpt=model_name == "ngpt")
-    model = GPT(config)
+    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], block_size=256, n_layer=1)
+    model = GPT(config, "checkpoints/best_gpt.safetensors")
     ### Load validation data and tokenizer
-    tokenizer = Tokenizer()
-    val_tokens = load_tokens("data/tiny_shakespeare_train.bin")
-    # val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
-    ### Inference on the first sentence of the validation set
-    # endoftext_positions = np.argwhere(val_tokens.numpy() == tokenizer.encode("<|endoftext|>")[0]).ravel()
-    # input_sentence = val_tokens[int(endoftext_positions[0]) + 1 : int(endoftext_positions[1]) + 1]
-    # expected_output_sentence = val_tokens[int(endoftext_positions[1]) + 1 : int(endoftext_positions[2]) + 1]
-    # print(f"Input sentence: {tokenizer.decode(input_sentence)}")
-    # print(f"Expected output sentence: {tokenizer.decode(expected_output_sentence)}")
-    # with Tensor.test():
-    #     output = model.generate(
-    #         ctx=input_sentence.view(1, -1),
-    #         max_new_tokens=len(expected_output_sentence),
-    #         temperature=1.0,
-    #     )[0]
-    #     print(f"Actual output sentence: {tokenizer.decode(output)}")
-    ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
-    endoftext_positions = np.argwhere(val_tokens.numpy() == tokenizer.encode("<|endoftext|>")[0]).ravel()
-    start_input = int(endoftext_positions[0]) + 1
-    i = 1
-    while i < len(endoftext_positions) and int(endoftext_positions[i]) - start_input <= config.block_size:
-        i += 1
-    end_input = int(endoftext_positions[i - 1]) + 1
-    start_expected_output = int(endoftext_positions[i]) + 1
-    while i < len(endoftext_positions) and int(endoftext_positions[i]) - start_expected_output <= config.block_size:
-        i += 1
-    end_expected_output = int(endoftext_positions[i - 1]) + 1
-    input = val_tokens[start_input:end_input]
-    expected_output = val_tokens[start_expected_output:end_expected_output]
+    tokens = load_tokens("data/shakespeare_char_train.bin")
+    # tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    tokenizer = Tokenizer(meta["itos"], meta["stoi"])
+    ###
+    max_new_tokens = 30
+    input = tokens[: config.block_size]
+    # input = Tensor(tokenizer.encode("\n"))
+    expected_output = tokens[config.block_size : config.block_size + max_new_tokens]
     print("############# Input #############")
-    print(tokenizer.decode(input))
+    print(tokenizer.decode(input.tolist()))
     print("############ Expected output #############")
-    print(tokenizer.decode(expected_output))
+    print(tokenizer.decode(expected_output.tolist()))
     print("############ Generated  output #############")
     with Tensor.test():
-        output = model.generate(
-            ctx=input.view(1, -1),
-            max_new_tokens=len(expected_output),
-            temperature=1.0,
-        )[0, len(input) :]
-    print(tokenizer.decode(output))
-    breakpoint()
+        output = model.generate(input.view(1, -1), max_new_tokens, 1.0)[0][0, -max_new_tokens:]
+    print(tokenizer.decode(output.tolist()))
 
 
 def naive_inference():
@@ -327,6 +260,7 @@ def naive_inference():
     config = GPTConfig(ngpt=model_name == "ngpt")
     model = GPT(config, "checkpoints/final_gpt.safetensors")
     ### Load validation data and tokenizer
+
     tokenizer = Tokenizer()
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
     ### Check that the entropy is similar to the one observed during the train

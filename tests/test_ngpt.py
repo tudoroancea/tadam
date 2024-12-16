@@ -3,8 +3,8 @@ import pytest
 from icecream import ic
 from tinygrad import Tensor, nn
 
+from tadam.model import GPT, GPTConfig
 from tadam.utils import norm
-from tadam.model import GPTConfig, GPT
 
 
 @pytest.fixture

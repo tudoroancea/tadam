@@ -1,6 +1,5 @@
 from tinygrad import Tensor
 
-
 __all__ = ["norm", "normalize"]
 
 
