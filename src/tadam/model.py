@@ -246,7 +246,7 @@ class GPT:
             # run model to obtain logits
             logits = self(ctx[:, max(0, i - self.config.block_size) : i])  # B, C, V
             # compute probabilities for each possible token
-            probs[:, i - C] = (logits[:, -1, :] / temperature).softmax()
+            probs[:, i - C] = (logits[:, -1, :] / temperature).softmax()  # B, V
             # sample next token from the probabilities
-            ctx[:, i : i + 1] = probs[:, i - C].multinomial()
+            ctx[:, i : i + 1] = probs[:, i - C].multinomial()  # B, 1
         return ctx[:, C:], probs

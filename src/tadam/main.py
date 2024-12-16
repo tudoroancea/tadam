@@ -37,8 +37,8 @@ def load_tokens(data_path: str):
 
 
 def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
-    # idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
-    idx = Tensor([0]).reshape(-1, 1)
+    idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
+    # idx = Tensor([[0]])
     x = toks[idx + Tensor.arange(ctx_len)].contiguous()
     y = toks[idx + Tensor.arange(1, ctx_len + 1)].contiguous()
     return x, y
@@ -259,6 +259,11 @@ def train():
                 f"{ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
             )
 
+    if save_checkpoints:
+        checkpoint_path = f"checkpoints/final_{model_name}.safetensors"
+        nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
+        wandb.save(checkpoint_path)
+
 
 def inference():
     ### Parse cli arguments
@@ -322,14 +327,19 @@ def naive_inference():
     temp = args.temp
     ### Load model
     config = GPTConfig(ngpt=model_name == "ngpt")
-    model = GPT(config)
+    model = GPT(config, "checkpoints/final_gpt.safetensors")
     ### Load validation data and tokenizer
     tokenizer = Tokenizer()
     train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    ### Check that the entropy is similar to the one observed during the train
+    with Tensor.test():
+        x, y = get_batch(train_tokens, 64, config.block_size)
+        entropy = model(x).sparse_categorical_crossentropy(y).numpy()
+        ic(entropy)
     ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
-
-    input = train_tokens[: config.block_size]
-    expected_output = train_tokens[config.block_size : config.block_size + 30]
+    i = np.random.randint(0, len(train_tokens) - config.block_size)
+    input = train_tokens[i : i + config.block_size]
+    expected_output = train_tokens[i + config.block_size : i + config.block_size + 30]
     print("############# Input #############")
     print(tokenizer.decode(input))
     print("############ Expected output #############")
@@ -337,10 +347,9 @@ def naive_inference():
     print("############ Generated  output #############")
     with Tensor.test():
         output, probs = model.generate(input.view(1, -1), len(expected_output), temp)
-        output = output[0]
+        output = output[0].numpy().tolist()
         probs = probs[0].numpy()
-    Device[Device.DEFAULT].synchronize()
-    print(tokenizer.decode(output))
+        print(tokenizer.decode(output))
 
     # plot distribution of logits
     import matplotlib.pyplot as plt
@@ -352,7 +361,6 @@ def naive_inference():
     def update(val):
         ax.clear()
         time_step = int(slider.val)
-        # ax.hist(probs[time_step], bins=100)
         ax.step(np.arange(len(probs[time_step])), probs[time_step], where="post")
         ax.set_title(f"Token Distribution at Step {time_step}")
         ax.set_xlabel("Probability")
