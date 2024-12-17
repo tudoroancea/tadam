@@ -59,6 +59,7 @@ def train():
     parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--silent", action="store_true")
     parser.add_argument("--skip_eval", action="store_true")
+    parser.add_argument("--log_grads", action="store_true")
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
@@ -76,6 +77,7 @@ def train():
     save_checkpoints = args.save_checkpoints
     silent = args.silent
     skip_eval = args.skip_eval
+    log_grads = args.log_grads
 
     ### Create logging stuff
     os.makedirs("checkpoints", exist_ok=True)
@@ -118,6 +120,10 @@ def train():
     state_dict = nn.state.get_state_dict(model)
     params = list(state_dict.values())
     match optimizer_name:
+        case "sgd":
+            if model_name == "ngpt":
+                raise NotImplementedError("SGD hasn't been implemented for NGPT yet.")
+            optimizer = nn.optim.SGD(params, lr=0, weight_decay=wd)
         case "adam":
             optimizer = Adam(params, lr=0, weight_decay=wd)
         case "intermediate_adam":
@@ -146,6 +152,7 @@ def train():
         return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
 
     best_eval_loss = float("inf")
+    grads = []
     if not silent:
         print("Starting training...\n=================\n")
     for step in (pbar := range(train_steps) if silent else tqdm(range(train_steps), unit="steps")):
@@ -258,15 +265,17 @@ def naive_inference():
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--temp", type=float, default=1.0)
+    parser.add_argument("--max_new_tokens", type=int, default=100)
+    parser.add_argument("--data", type=str, default="train", choices=["train", "val"])
     args = parser.parse_args()
     model_name = args.model
     temp = args.temp
     ### Load model
     config = GPTConfig(ngpt=model_name == "ngpt")
-    model = GPT(config, "checkpoints/final_gpt.safetensors")
+    model = GPT(config, f"checkpoints/final_{model_name}.safetensors")
     ### Load validation data and tokenizer
     tokenizer = Tokenizer(meta["itos"], meta["stoi"])
-    tokens = load_tokens("data/shakespeare_char_train.bin")
+    tokens = load_tokens(f"data/shakespeare_char_{args.data}.bin")
     ### Check that the entropy is similar to the one observed during the train
     with Tensor.test():
         x, y = get_batch(tokens, 64, config.block_size)
@@ -275,7 +284,7 @@ def naive_inference():
     ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
     i = np.random.randint(0, len(tokens) - config.block_size)
     input = tokens[i : i + config.block_size]
-    expected_output = tokens[i + config.block_size : i + config.block_size + 50]
+    expected_output = tokens[i + config.block_size : i + config.block_size + args.max_new_tokens]
     print("############# Input #############")
     print(tokenizer.decode(input.tolist()))
     print("############ Expected output #############")
