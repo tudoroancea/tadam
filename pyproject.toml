@@ -17,11 +17,15 @@ dependencies = [
 ]
 
 [project.scripts]
+# word-level GPTs
 download_dataset = "tadam.main:download_dataset"
-train = "tadam.main:train"
 beam = "tadam.main:beam"
+train = "tadam.main:train"
 inference = "tadam.main:inference"
 naive_inference = "tadam.main:naive_inference"
+# char-level GPTs
+download_dataset_char = "tadam.main_char:download_dataset"
+beam_char = "tadam.main_char:beam"
 train_char = "tadam.main_char:train"
 inference_char = "tadam.main_char:inference"
 naive_inference_char = "tadam.main_char:naive_inference"

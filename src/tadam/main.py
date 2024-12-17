@@ -14,6 +14,42 @@ from tadam.model import GPT, GPTConfig
 from tadam.optim import Adam, CayleyAdam, IntermediateAdam
 
 Tensor.manual_seed(127)
+np.random.seed(127)
+
+
+def download_dataset():
+    """
+    train has 301,966 tokens
+    val has 36,059 tokens
+    """
+    import requests
+
+    # download the tiny shakespeare dataset
+    os.makedirs("data", exist_ok=True)
+    input_file_path = os.path.join("data/input.txt")
+    if not os.path.exists(input_file_path):
+        data_url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        with open(input_file_path, "w", encoding="utf-8") as f:
+            f.write(requests.get(data_url).text)
+
+    with open(input_file_path, "r", encoding="utf-8") as f:
+        data = f.read()
+    n = len(data)
+    train_data = data[: int(n * 0.9)]
+    val_data = data[int(n * 0.9) :]
+
+    # encode with tiktoken gpt2 bpe
+    enc = tiktoken.get_encoding("gpt2")
+    train_ids = enc.encode_ordinary(train_data)
+    val_ids = enc.encode_ordinary(val_data)
+    print(f"train has {len(train_ids):,} tokens")
+    print(f"val has {len(val_ids):,} tokens")
+
+    # export to bin files
+    train_ids = np.array(train_ids, dtype=np.uint16)
+    val_ids = np.array(val_ids, dtype=np.uint16)
+    train_ids.tofile(os.path.join("data/shakespeare_train.bin"))
+    val_ids.tofile(os.path.join("data/shakespeare_val.bin"))
 
 
 class Tokenizer:
@@ -31,11 +67,11 @@ class Tokenizer:
 
 def load_tokens(data_path: str):
     with open(data_path, "rb") as f:
-        f.seek(0x400)
         tokens_np = np.frombuffer(f.read(), dtype=np.uint16).astype(np.int32)
     return Tensor(tokens_np)
 
 
+@TinyJit
 def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
     idx = Tensor.randint(batch_size, low=0, high=len(toks) - ctx_len - 1).reshape(-1, 1)
     # idx = Tensor([[0]])
@@ -145,8 +181,8 @@ def train():
         )
 
     ### Load data
-    train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
-    eval_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    train_tokens = load_tokens("data/shakespeare_train.bin")
+    eval_tokens = load_tokens("data/shakespeare_val.bin")
     if not silent:
         print(
             f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
@@ -176,17 +212,18 @@ def train():
         total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
         ic(trainable_params_dict, total_number_trainable_parameters)
 
-    ### Training loop
+    ### Setup steps
+    get_batch = TinyJit(get_batch)
+
     @TinyJit
     def training_step(x, y):
-        loss = model(x).sparse_categorical_crossentropy(y)
-        loss.backward()
-        return loss.realize(*optimizer.schedule_step())
+        return model(x).sparse_categorical_crossentropy(y).backward().realize(*optimizer.schedule_step())
 
     @TinyJit
     def eval_step(x, y):
-        return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
+        return model(x, eval=True).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
 
+    ### Training loop
     best_eval_loss = float("inf")
     if not silent:
         print("Starting training...\n=================\n")
@@ -273,8 +310,8 @@ def inference():
     model = GPT(config)
     ### Load validation data and tokenizer
     tokenizer = Tokenizer()
-    val_tokens = load_tokens("data/tiny_shakespeare_train.bin")
-    # val_tokens = load_tokens("data/tiny_shakespeare_val.bin")
+    val_tokens = load_tokens("data/shakespeare_train.bin")
+    # val_tokens = load_tokens("data/shakespeare_val.bin")
     ### Inference on the first sentence of the validation set
     # endoftext_positions = np.argwhere(val_tokens.numpy() == tokenizer.encode("<|endoftext|>")[0]).ravel()
     # input_sentence = val_tokens[int(endoftext_positions[0]) + 1 : int(endoftext_positions[1]) + 1]
@@ -328,7 +365,7 @@ def naive_inference():
     model = GPT(config, "checkpoints/final_gpt.safetensors")
     ### Load validation data and tokenizer
     tokenizer = Tokenizer()
-    train_tokens = load_tokens("data/tiny_shakespeare_train.bin")
+    train_tokens = load_tokens("data/shakespeare_train.bin")
     ### Check that the entropy is similar to the one observed during the train
     with Tensor.test():
         x, y = get_batch(train_tokens, 64, config.block_size)
@@ -372,24 +409,3 @@ def naive_inference():
     update(0)
     plt.savefig("distribution.png", dpi=300, bbox_inches="tight")
     plt.show()
-
-
-def download_dataset():
-    import os
-
-    import requests
-
-    if not os.path.exists("data"):
-        os.makedirs("data")
-    for set in {"train", "val"}:
-        url = f"https://huggingface.co/datasets/karpathy/llmc-starter-pack/resolve/main/tiny_shakespeare_{set}.bin"
-        filename = f"data/tiny_shakespeare_{set}.bin"
-        try:
-            response = requests.get(url)
-            response.raise_for_status()  # Raises an HTTPError if the status is 4xx, 5xx
-            with open(filename, "wb") as file:
-                file.write(response.content)
-            print(f"Successfully downloaded {filename}")
-
-        except requests.exceptions.RequestException as e:
-            print(f"An error occurred: {e}")

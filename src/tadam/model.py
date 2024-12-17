@@ -231,10 +231,10 @@ class GPT:
         # crop RoPE cache to context length
         rope_cache = self.rope_cache[:C, ...]
         x = tok_emb.sequential(functools.partial(layer, rope_cache=rope_cache) for layer in self.h)  # B,C,E
-        logits = self.lm_head(x) if not eval else self.lm_head(x[:, [-1], :])
+        logits = self.lm_head(x) if not eval else self.lm_head(x[:, [-1], :])  # B,C,V or B,1,V
         if self.config.ngpt:
             logits = logits * self.s_z()
-        logits = logits[:, :, : self.config.vocab_size]  # B, C, V
+        logits = logits[:, :, : self.config.vocab_size]  # B,C,V or B,1,V
         return logits
 
     def generate(self, ctx: Tensor, max_new_tokens: int, temperature: float = 1.0):

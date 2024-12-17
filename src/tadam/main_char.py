@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 from icecream import ic
-from tinygrad import Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
+from tinygrad import Context, Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
 import wandb
@@ -15,6 +15,75 @@ from tadam.optim import Adam, CayleyAdam, IntermediateAdam
 
 Tensor.manual_seed(127)
 np.random.seed(127)
+
+META_DATA_FILE = "data/shakespeare_char_meta.pkl"
+TRAIN_DATA_FILE = "data/shakespeare_char_train.bin"
+EVAL_DATA_FILE = "data/shakespeare_char_eval.bin"
+
+
+def download_dataset():
+    """
+    length of dataset in characters: 1,115,394
+    all the unique characters: !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
+    vocab size: 65
+    train has 1,003,854 tokens
+    eval has 111,540 tokens
+    """
+    import requests
+
+    # download the tiny shakespeare dataset
+    os.makedirs("data", exist_ok=True)
+    input_file_path = os.path.join("data/input.txt")
+    if not os.path.exists(input_file_path):
+        data_url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        with open(input_file_path, "w") as f:
+            f.write(requests.get(data_url).text)
+
+    with open(input_file_path, "r") as f:
+        data = f.read()
+    print(f"length of dataset in characters: {len(data):,}")
+
+    # get all the unique characters that occur in this text
+    chars = sorted(list(set(data)))
+    vocab_size = len(chars)
+    print("all the unique characters:", "".join(chars))
+    print(f"vocab size: {vocab_size:,}")
+
+    # create a mapping from characters to integers
+    stoi = {ch: i for i, ch in enumerate(chars)}
+    itos = {i: ch for i, ch in enumerate(chars)}
+
+    def encode(s):
+        return [stoi[c] for c in s]  # encoder: take a string, output a list of integers
+
+    def decode(l):
+        return "".join([itos[i] for i in l])  # decoder: take a list of integers, output a string
+
+    # create the train and test splits
+    n = len(data)
+    train_data = data[: int(n * 0.9)]
+    val_data = data[int(n * 0.9) :]
+
+    # encode both to integers
+    train_ids = encode(train_data)
+    eval_ids = encode(val_data)
+    print(f"train has {len(train_ids):,} tokens")
+    print(f"val has {len(eval_ids):,} tokens")
+
+    # export to bin files
+    train_ids = np.array(train_ids, dtype=np.uint8)
+    eval_ids = np.array(eval_ids, dtype=np.uint8)
+    train_ids.tofile(TRAIN_DATA_FILE)
+    eval_ids.tofile(EVAL_DATA_FILE)
+
+    # save the meta information as well, to help us encode/decode later
+    meta = {
+        "vocab_size": vocab_size,
+        "itos": itos,
+        "stoi": stoi,
+    }
+    with open(META_DATA_FILE, "wb") as f:
+        pickle.dump(meta, f)
 
 
 class Tokenizer:
@@ -42,6 +111,58 @@ def get_batch(toks: Tensor, batch_size: int, ctx_len: int):
     return x, y
 
 
+def beam():
+    ### Parse cli arguments
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--beam", type=int, default=10)
+    args = parser.parse_args()
+    model_name = args.model
+    optimizer_name = args.optimizer
+    ctx_len = args.ctx_len
+    batch_size = args.batch_size
+    beam = args.beam
+
+    ### Load data
+    with open(META_DATA_FILE, "rb") as f:
+        meta = pickle.load(f)
+
+    # Create model, optimizer, and beam search for train and eval steps
+    with Context(DEBUG=2, BEAM=beam):
+        for n_layer in [1, 6]:
+            config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], n_layer=n_layer)
+            assert 1 <= ctx_len <= config.block_size
+            model = GPT(config)
+            params = list(nn.state.get_state_dict(model).values())
+            match optimizer_name:
+                case "sgd":
+                    if model_name == "ngpt":
+                        raise NotImplementedError("SGD hasn't been implemented for NGPT yet.")
+                    optimizer = nn.optim.SGD(params, lr=1.0, weight_decay=1.0)
+                case "adam":
+                    optimizer = Adam(params, lr=1.0, weight_decay=1.0)
+                case "intermediate_adam":
+                    raise NotImplementedError
+                    optimizer = IntermediateAdam(params, lr=1.0, weight_decay=1.0)
+                case "cayley":
+                    raise NotImplementedError
+                    optimizer = CayleyAdam(params, lr=1.0, weight_decay=1.0)
+                case _:
+                    raise ValueError(f"Unknown optimizer name: {optimizer_name}")
+
+            x = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
+            y = Tensor.randint(batch_size, ctx_len, low=0, high=GPTConfig.vocab_size)
+            with Tensor.train():
+                _ = model(x).sparse_categorical_crossentropy(y).backward().realize(*optimizer.schedule_step()).item()
+                Device[Device.DEFAULT].synchronize()  # maybe useless
+            with Tensor.test():
+                _ = model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers)).item()
+                Device[Device.DEFAULT].synchronize()  # maybe useless
+
+
 def train():
     ### Parse cli arguments
     parser = ArgumentParser()
@@ -61,7 +182,6 @@ def train():
     parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--silent", action="store_true")
     parser.add_argument("--skip_eval", action="store_true")
-    parser.add_argument("--log_grads", action="store_true")
     args = parser.parse_args()
     model_name = args.model
     optimizer_name = args.optimizer
@@ -81,7 +201,6 @@ def train():
     save_checkpoints = args.save_checkpoints
     silent = args.silent
     skip_eval = args.skip_eval
-    log_grads = args.log_grads
 
     ### Create logging stuff
     os.makedirs("checkpoints", exist_ok=True)
@@ -108,11 +227,10 @@ def train():
         )
 
     ### Load data
-    train_tokens = load_tokens("data/shakespeare_char_train.bin")
-    eval_tokens = load_tokens("data/shakespeare_char_val.bin")
-    with open("data/shakespeare_char_meta.pkl", "rb") as f:
+    train_tokens = load_tokens(TRAIN_DATA_FILE)
+    eval_tokens = load_tokens(EVAL_DATA_FILE)
+    with open(META_DATA_FILE, "rb") as f:
         meta = pickle.load(f)
-    print(meta)
     if not silent:
         print(
             f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
@@ -120,7 +238,7 @@ def train():
         )
 
     ### Create model and optimizer
-    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], n_layer=6)
+    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"])
     assert 1 <= ctx_len <= config.block_size
     model = GPT(config)
     state_dict = nn.state.get_state_dict(model)
@@ -146,45 +264,48 @@ def train():
         total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
         ic(trainable_params_dict, total_number_trainable_parameters)
 
-    ### Training loop
+    ### Setup training and eval steps
     @TinyJit
-    def training_step(x, y):
-        loss = model(x).sparse_categorical_crossentropy(y)
-        loss.backward()
-        return loss.realize(*optimizer.schedule_step())
+    def training_step():
+        x, y = get_batch(train_tokens, batch_size, ctx_len)
+        return model(x).sparse_categorical_crossentropy(y).backward().realize(*optimizer.schedule_step())
 
     @TinyJit
-    def eval_step(x, y):
-        return model(x, eval=True).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
+    def eval_step():
+        x, y = get_batch(eval_tokens, batch_size, ctx_len)
+        return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
 
+    def perform_eval(best_eval_loss: float, eval_loss: float):
+        # compute loss over a few batches in the train and eval datasets
+        t0 = time.perf_counter()
+        with Tensor.test():
+            eval_loss = sum(eval_step().item() for _ in range(eval_steps)) / eval_steps
+            Device[Device.DEFAULT].synchronize()  # maybe useless
+        eval_runtime = time.perf_counter() - t0
+        wandb.log(
+            {
+                "performance/eval_time_ms": 1000 * eval_runtime,
+                "eval_loss": eval_loss,
+            }
+        )
+        # Save checkpoint
+        if save_checkpoints and eval_loss < best_eval_loss:
+            best_eval_loss = eval_loss
+            checkpoint_path = f"checkpoints/best_{model_name}.safetensors"
+            nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
+            wandb.save(checkpoint_path)
+
+        return best_eval_loss, eval_loss
+
+    ### Run the loop
     best_eval_loss = float("inf")
-    grads = []
+    eval_loss = float("inf")
     if not silent:
         print("Starting training...\n=================\n")
     for step in (pbar := range(train_steps) if silent else tqdm(range(train_steps), unit="steps")):
         # Evaluation step
         if step % eval_interval == 0 and not skip_eval:
-            # compute loss over a few batches in the train and eval datasets
-            t0 = time.perf_counter()
-            with Tensor.test():
-                eval_loss = (
-                    sum(eval_step(*get_batch(eval_tokens, batch_size, ctx_len)).item() for _ in range(eval_steps))
-                    / eval_steps
-                )
-                Device[Device.DEFAULT].synchronize()
-            eval_runtime = time.perf_counter() - t0
-            wandb.log(
-                {
-                    "performance/eval_time_ms": 1000 * eval_runtime,
-                    "eval_loss": eval_loss,
-                }
-            )
-            # Save checkpoint
-            if save_checkpoints and eval_loss < best_eval_loss:
-                best_eval_loss = eval_loss
-                checkpoint_path = f"checkpoints/best_{model_name}.safetensors"
-                nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
-                wandb.save(checkpoint_path)
+            best_eval_loss, eval_loss = perform_eval(best_eval_loss, eval_loss)
 
         # LR schedule
         if step < warmup_steps:
@@ -199,13 +320,12 @@ def train():
         optimizer.lr[0] = lr
 
         # Training step
-        x, y = get_batch(train_tokens, batch_size, ctx_len)
         GlobalCounters.reset()
         t0 = time.perf_counter()
         with Tensor.train():
-            train_loss = training_step(x, y).item()
+            train_loss = training_step().item()
             optimizer.zero_grad()
-            Device[Device.DEFAULT].synchronize()
+            Device[Device.DEFAULT].synchronize()  # maybe useless
         step_runtime_s = time.perf_counter() - t0
         step_runtime_ms = 1000 * step_runtime_s
         tflops = GlobalCounters.global_ops / step_runtime_s / 1e12
@@ -224,10 +344,11 @@ def train():
                 }
             )
             pbar.desc = (
-                f"train loss: {train_loss:.4f}, step time: {step_runtime_ms:.4f}ms, "
-                f"{ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
+                f"train loss: {train_loss:.4f}, eval loss: {eval_loss:.4f}, "
+                f"step time: {step_runtime_ms:.4f}ms, {ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
             )
 
+    best_eval_loss, eval_loss = perform_eval(best_eval_loss, eval_loss)
     if save_checkpoints:
         checkpoint_path = f"checkpoints/final_{model_name}.safetensors"
         nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
@@ -235,44 +356,13 @@ def train():
 
 
 def inference():
-    with open("data/shakespeare_char_meta.pkl", "rb") as f:
-        meta = pickle.load(f)
-    ### Parse cli arguments
-    parser = ArgumentParser()
-    parser.add_argument("--model", type=str, default="gpt")
-    parser.add_argument("--temp", type=float, default=1.0)
-    args = parser.parse_args()
-    model_name = args.model
-    ### Load model
-    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], block_size=256, n_layer=1)
-    model = GPT(config, "checkpoints/final_gpt.safetensors")
-    ### Load validation data and tokenizer
-    tokens = load_tokens("data/shakespeare_char_train.bin")
-    # tokens = load_tokens("data/tiny_shakespeare_val.bin")
-    tokenizer = Tokenizer(meta["itos"], meta["stoi"])
-    ###
-    max_new_tokens = 30
-    input = tokens[: config.block_size]
-    # input = Tensor(tokenizer.encode("\n"))
-    expected_output = tokens[config.block_size : config.block_size + max_new_tokens]
-    print("############# Input #############")
-    print(tokenizer.decode(input.tolist()))
-    print("############ Expected output #############")
-    print(tokenizer.decode(expected_output.tolist()))
-    print("############ Generated  output #############")
-    with Tensor.test():
-        output = model.generate(input.view(1, -1), max_new_tokens, args.temp)[0][0, -max_new_tokens:]
-    print(tokenizer.decode(output.tolist()))
-
-
-def naive_inference():
-    with open("data/shakespeare_char_meta.pkl", "rb") as f:
+    with open(META_DATA_FILE, "rb") as f:
         meta = pickle.load(f)
     parser = ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--temp", type=float, default=1.0)
     parser.add_argument("--max_new_tokens", type=int, default=100)
-    parser.add_argument("--data", type=str, default="train", choices=["train", "val"])
+    parser.add_argument("--data", type=str, default="eval", choices=["train", "eval"])
     args = parser.parse_args()
     model_name = args.model
     temp = args.temp
@@ -281,13 +371,8 @@ def naive_inference():
     model = GPT(config, f"checkpoints/final_{model_name}.safetensors")
     ### Load validation data and tokenizer
     tokenizer = Tokenizer(meta["itos"], meta["stoi"])
-    tokens = load_tokens(f"data/shakespeare_char_{args.data}.bin")
-    ### Check that the entropy is similar to the one observed during the train
-    with Tensor.test():
-        x, y = get_batch(tokens, 64, config.block_size)
-        entropy = model(x).sparse_categorical_crossentropy(y).numpy()
-        ic(entropy)
-    ### Take as many sentences as possible fitting in the block size, and make the model generate the next sentences
+    tokens = load_tokens(TRAIN_DATA_FILE if args.data == "train" else EVAL_DATA_FILE)
+    ### Generate based on the first sentence
     i = np.random.randint(0, len(tokens) - config.block_size)
     input = tokens[i : i + config.block_size]
     expected_output = tokens[i + config.block_size : i + config.block_size + args.max_new_tokens]
@@ -301,48 +386,3 @@ def naive_inference():
         output = output[0].numpy().tolist()
         probs = probs[0].numpy()
         print(tokenizer.decode(output))
-
-    # plot distribution of logits
-    import matplotlib.pyplot as plt
-    from matplotlib.widgets import Slider
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    plt.subplots_adjust(bottom=0.25)
-
-    def update(val):
-        ax.clear()
-        time_step = int(slider.val)
-        ax.step(np.arange(len(probs[time_step])), probs[time_step], where="post")
-        ax.set_title(f"Token Distribution at Step {time_step}")
-        ax.set_xlabel("Probability")
-        ax.set_ylabel("Count")
-        # fig.canvas.draw_idle()
-
-    ax_slider = plt.axes([0.1, 0.1, 0.65, 0.03])
-    slider = Slider(ax_slider, "Time Step", 0, len(probs) - 1, valinit=0, valstep=1)
-    slider.on_changed(update)
-
-    update(0)
-    plt.savefig("distribution.png", dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-def download_dataset():
-    import os
-
-    import requests
-
-    if not os.path.exists("data"):
-        os.makedirs("data")
-    for set in {"train", "val"}:
-        url = f"https://huggingface.co/datasets/karpathy/llmc-starter-pack/resolve/main/tiny_shakespeare_{set}.bin"
-        filename = f"data/tiny_shakespeare_{set}.bin"
-        try:
-            response = requests.get(url)
-            response.raise_for_status()  # Raises an HTTPError if the status is 4xx, 5xx
-            with open(filename, "wb") as file:
-                file.write(response.content)
-            print(f"Successfully downloaded {filename}")
-
-        except requests.exceptions.RequestException as e:
-            print(f"An error occurred: {e}")

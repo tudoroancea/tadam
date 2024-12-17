@@ -15,5 +15,7 @@ wheels/
 # wandb logging
 wandb
 
+data
+
 # Misc
 .DS_Store
