@@ -56,6 +56,8 @@ def train():
     parser.add_argument("--max_lr", type=float, default=1e-3)
     parser.add_argument("--min_lr", type=float, default=None)
     parser.add_argument("--wd", type=float, default=1e-1)
+    parser.add_argument("--beta1", type=float, default=0.9)
+    parser.add_argument("--beta2", type=float, default=0.999)
     parser.add_argument("--save_checkpoints", action="store_true")
     parser.add_argument("--silent", action="store_true")
     parser.add_argument("--skip_eval", action="store_true")
@@ -74,6 +76,8 @@ def train():
     if min_lr is None:
         min_lr = max_lr / 10  # as per Chinchilla
     wd = args.wd
+    beta1 = args.beta1
+    beta2 = args.beta2
     save_checkpoints = args.save_checkpoints
     silent = args.silent
     skip_eval = args.skip_eval
@@ -95,6 +99,8 @@ def train():
                 "max_lr": max_lr,
                 "min_lr": min_lr,
                 "wd": wd,
+                "beta1": beta1,
+                "beta2": beta2,
                 "batch_size": batch_size,
                 "device": Device.DEFAULT,
                 "beam": os.getenv("BEAM", 0),
@@ -125,7 +131,7 @@ def train():
                 raise NotImplementedError("SGD hasn't been implemented for NGPT yet.")
             optimizer = nn.optim.SGD(params, lr=0, weight_decay=wd)
         case "adam":
-            optimizer = Adam(params, lr=0, weight_decay=wd)
+            optimizer = Adam(params, lr=0, weight_decay=wd, beta1=beta1, beta2=beta2)
         case "intermediate_adam":
             raise NotImplementedError
             optimizer = IntermediateAdam(params, lr=0, weight_decay=wd)
