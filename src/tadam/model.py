@@ -179,8 +179,8 @@ class Block:
         self.mlp = MLP(config)
         if config.ngpt:
             # eigen learning rates
-            self.alpha_attn = Scale(config.n_embd, init=0.05, scale=config.base_scale)
-            self.alpha_mlp = Scale(config.n_embd, init=0.05, scale=config.base_scale)
+            self.alpha_attn = Scale(config.n_embd, init=1 / config.n_layer, scale=config.base_scale)
+            self.alpha_mlp = Scale(config.n_embd, init=1 / config.n_layer, scale=config.base_scale)
         else:
             # layer normalization
             self.ln_1 = nn.LayerNorm(config.n_embd, elementwise_affine=False)
@@ -188,6 +188,7 @@ class Block:
 
     def __call__(self, x: Tensor, rope_cache: Tensor):
         if self.config.ngpt:
+            # LERP between x and attn(x):  x + alpha * (attn(x) - x) = (1 - alpha) * x + alpha * attn(x)
             x = normalize(x + self.alpha_attn() * (normalize(self.attn(x, rope_cache)) - x))
             x = normalize(x + self.alpha_mlp() * (normalize(self.mlp(x)) - x))
         else:

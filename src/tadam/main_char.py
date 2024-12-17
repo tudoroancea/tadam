@@ -155,7 +155,7 @@ def train():
 
     @TinyJit
     def eval_step(x, y):
-        return model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
+        return model(x, eval=True).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers))
 
     best_eval_loss = float("inf")
     grads = []
