@@ -179,8 +179,8 @@ class Block:
         self.mlp = MLP(config)
         if config.ngpt:
             # eigen learning rates
-            self.alpha_attn = Scale(config.n_embd, init=1 / config.n_layer, scale=1.0 / math.sqrt(config.n_embd))
-            self.alpha_mlp = Scale(config.n_embd, init=1 / config.n_layer, scale=1.0 / math.sqrt(config.n_embd))
+            self.alpha_attn = Scale(config.n_embd, init=0.05, scale=config.base_scale)
+            self.alpha_mlp = Scale(config.n_embd, init=0.05, scale=config.base_scale)
         else:
             # layer normalization
             self.ln_1 = nn.LayerNorm(config.n_embd, elementwise_affine=False)
@@ -210,13 +210,9 @@ class GPT:
         self.h = [Block(config) for _ in range(config.n_layer)]
         self.lm_head = Linear(config.n_embd, config.padded_vocab_size, config)
         if config.ngpt:
-            self.s_z = Scale(
-                config.padded_vocab_size,
-                init=1.0,
-                scale=1.0 / math.sqrt(config.padded_vocab_size),
-            )
+            self.s_z = Scale(config.padded_vocab_size, init=1.0, scale=config.base_scale)
         # weight tying (https://paperswithcode.com/method/weight-tying)
-        # assert self.wte.weight.shape == self.out_proj.weight.shape
+        assert self.wte.weight.shape == self.lm_head.weight.shape
         self.wte.weight = self.lm_head.weight
 
         # pre-compute rope cache for block_size
@@ -227,14 +223,14 @@ class GPT:
         if weights_path is not None:
             nn.state.load_state_dict(self, nn.state.safe_load(weights_path))
 
-    def __call__(self, idx: Tensor) -> Tensor:
+    def __call__(self, idx: Tensor, eval: bool = False) -> Tensor:
         _, C = idx.shape
         # token embeddings
         tok_emb = self.wte(idx)  # B, C, E
         # crop RoPE cache to context length
         rope_cache = self.rope_cache[:C, ...]
         x = tok_emb.sequential(functools.partial(layer, rope_cache=rope_cache) for layer in self.h)  # B,C,E
-        logits = self.lm_head(x)
+        logits = self.lm_head(x) if not eval else self.lm_head(x[:, [-1], :])
         if self.config.ngpt:
             logits = logits * self.s_z()
         logits = logits[:, :, : self.config.vocab_size]  # B, C, V
@@ -247,7 +243,7 @@ class GPT:
         probs = Tensor.rand(B, max_new_tokens, self.config.vocab_size, contiguous=True)
         for i in range(C, C + max_new_tokens):
             # run model to obtain logits
-            logits = self(ctx[:, max(0, i - self.config.block_size) : i])  # B, C, V
+            logits = self(ctx[:, max(0, i - self.config.block_size) : i], True)  # B, C, V
             # compute probabilities for each possible token
             probs[:, i - C] = (logits[:, -1, :] / temperature).softmax()  # B, V
             # sample next token from the probabilities
