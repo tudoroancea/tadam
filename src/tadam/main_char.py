@@ -3,6 +3,7 @@ import os
 import pickle
 import time
 from argparse import ArgumentParser
+from collections import defaultdict
 
 import numpy as np
 from icecream import ic
@@ -11,7 +12,7 @@ from tinygrad.helpers import tqdm
 
 import wandb
 from tadam.model import GPT, GPTConfig
-from tadam.optim import Adam, CayleyAdam, IntermediateAdam
+from tadam.optim import TADAM, Adam
 
 Tensor.manual_seed(127)
 np.random.seed(127)
@@ -19,6 +20,8 @@ np.random.seed(127)
 META_DATA_FILE = "data/shakespeare_char_meta.pkl"
 TRAIN_DATA_FILE = "data/shakespeare_char_train.bin"
 EVAL_DATA_FILE = "data/shakespeare_char_eval.bin"
+
+DEFAULT_BATCH_SIZE = 64
 
 
 def download_dataset():
@@ -117,7 +120,7 @@ def beam():
     parser.add_argument("--model", type=str, default="gpt")
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--beam", type=int, default=10)
     args = parser.parse_args()
     model_name = args.model
@@ -144,12 +147,9 @@ def beam():
                     optimizer = nn.optim.SGD(params, lr=1.0, weight_decay=1.0)
                 case "adam":
                     optimizer = Adam(params, lr=1.0, weight_decay=1.0)
-                case "intermediate_adam":
+                case "tadam":
                     raise NotImplementedError
-                    optimizer = IntermediateAdam(params, lr=1.0, weight_decay=1.0)
-                case "cayley":
-                    raise NotImplementedError
-                    optimizer = CayleyAdam(params, lr=1.0, weight_decay=1.0)
+                    optimizer = TADAM(params, lr=1.0, weight_decay=1.0)
                 case _:
                     raise ValueError(f"Unknown optimizer name: {optimizer_name}")
 
@@ -161,6 +161,144 @@ def beam():
             with Tensor.test():
                 _ = model(x).sparse_categorical_crossentropy(y).realize(*(optimizer.params + optimizer.buffers)).item()
                 Device[Device.DEFAULT].synchronize()  # maybe useless
+
+
+def analyze_grads():
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    mpl.use("qtagg")
+
+    ### Parse cli arguments
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
+    parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--warmup_steps", type=int, default=0)
+    parser.add_argument("--max_lr", type=float, default=1e-3)
+    parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--wd", type=float, default=1e-1)
+    parser.add_argument("--beta1", type=float, default=0.9)
+    parser.add_argument("--beta2", type=float, default=0.999)
+    args = parser.parse_args()
+    model_name = args.model
+    optimizer_name = args.optimizer
+    ctx_len = args.ctx_len
+    batch_size = args.batch_size
+    warmup_steps = args.warmup_steps
+    max_lr = args.max_lr
+    min_lr = args.min_lr
+    if min_lr is None:
+        min_lr = max_lr / 10  # as per Chinchilla
+    wd = args.wd
+    beta1 = args.beta1
+    beta2 = args.beta2
+
+    ### Load data
+    train_tokens = load_tokens(TRAIN_DATA_FILE)
+    with open(META_DATA_FILE, "rb") as f:
+        meta = pickle.load(f)
+
+    ### Create model and optimizer
+    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"])
+    assert 1 <= ctx_len <= config.block_size
+    model = GPT(config)
+    state_dict = nn.state.get_state_dict(model)
+    params = list(state_dict.values())
+    match optimizer_name:
+        case "sgd":
+            if model_name == "ngpt":
+                raise NotImplementedError("SGD hasn't been implemented for NGPT yet.")
+            optimizer = nn.optim.SGD(params, lr=0, weight_decay=wd)
+        case "adam":
+            optimizer = Adam(params, lr=0, weight_decay=wd, beta1=beta1, beta2=beta2)
+        case "tadam":
+            optimizer = TADAM(params, lr=0, weight_decay=wd, beta1=beta1, beta2=beta2)
+        case _:
+            raise ValueError(f"Unknown optimizer name: {optimizer_name}")
+
+    ### Setup training and eval steps
+    @TinyJit
+    def training_step():
+        x, y = get_batch(train_tokens, batch_size, ctx_len)
+        loss = model(x).sparse_categorical_crossentropy(y)
+        loss.backward()
+        grad_normal_residuals = {
+            k: (p * p.grad).sum(-1) for k, p in state_dict.items() if p.grad is not None and p.ndim == 2
+        }
+        grad_tangent_residuals = {
+            k: (state_dict[k].grad.square().sum(-1) + grad_normal_residuals[k].square()).sqrt()
+            for k in grad_normal_residuals
+        }
+
+        return (
+            loss.realize(*optimizer.schedule_step(), *grad_normal_residuals.values(), *grad_tangent_residuals.values()),
+            {k: v.numpy() for k, v in grad_normal_residuals.items()},
+            {k: v.numpy() for k, v in grad_tangent_residuals.items()},
+        )
+
+    ### Run the loop
+    n = defaultdict(list)
+    t = defaultdict(list)
+    for step in range(10):
+        # LR schedule
+        if step < warmup_steps:
+            # LR warmup
+            lr = max_lr * (step / warmup_steps)
+        else:
+            # Cosine annealing
+            decay_ratio = (step - warmup_steps) / (1000 - warmup_steps)
+            assert 0.0 <= decay_ratio <= 1.0
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+            lr = min_lr + coeff * (max_lr - min_lr)
+        optimizer.lr[0] = lr
+
+        # Training step
+        with Tensor.train():
+            train_loss, grad_normal_residuals, grad_tangent_residuals = training_step()
+            optimizer.zero_grad()
+            Device[Device.DEFAULT].synchronize()  # maybe useless
+
+        # n.append(list(grad_normal_residuals.values()))
+        # t.append(list(grad_tangent_residuals.values()))
+        for k in grad_normal_residuals:
+            n[k].append(grad_normal_residuals[k])
+            t[k].append(grad_tangent_residuals[k])
+
+        # analyze gradients
+        # grad_normal_residuals_mean = {k: v.mean() for k, v in grad_normal_residuals.items()}
+        # grad_normal_residuals_std = {k: v.std() for k, v in grad_normal_residuals.items()}
+        # grad_tangent_residuals_mean = {k: v.mean() for k, v in grad_tangent_residuals.items()}
+        # grad_tangent_residuals_std = {k: v.std() for k, v in grad_tangent_residuals.items()}
+        # ic(
+        #     grad_normal_residuals_mean,
+        #     grad_normal_residuals_std,
+        #     grad_tangent_residuals_mean,
+        #     grad_tangent_residuals_std,
+        # )
+        # breakpoint()
+    # plot...
+    # log y axis
+    # x axis = step
+    # scatter plot in red points for the normal residuals, in blue points for the tangent residuals
+    # breakpoint()
+    n = {k: np.array(v) for k, v in n.items()}
+    t = {k: np.array(v) for k, v in t.items()}
+    for k in n:
+        plt.figure()
+        plt.scatter(np.repeat(np.arange(n[k].shape[0]), n[k].shape[1]), np.ravel(n[k]), c="r", label="normal residuals")
+        plt.scatter(
+            np.repeat(np.arange(t[k].shape[0]), t[k].shape[1]), np.ravel(t[k]), c="b", label="tangent residuals"
+        )
+        plt.legend(
+            loc="best",
+        )
+        plt.yscale("log")
+        plt.title(f"Gradient residuals for weight {k}")
+        plt.xlabel("Step")
+        plt.ylabel("residuals")
+    plt.show()
 
 
 def train():
@@ -176,6 +314,7 @@ def train():
     parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--max_lr", type=float, default=1e-3)
     parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--lr_decay_steps", type=int, default=None)
     parser.add_argument("--wd", type=float, default=1e-1)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.999)
@@ -195,6 +334,9 @@ def train():
     min_lr = args.min_lr
     if min_lr is None:
         min_lr = max_lr / 10  # as per Chinchilla
+    lr_decay_steps = args.lr_decay_steps
+    if lr_decay_steps is None:
+        lr_decay_steps = train_steps
     wd = args.wd
     beta1 = args.beta1
     beta2 = args.beta2
@@ -217,6 +359,7 @@ def train():
                 "warmup_steps": warmup_steps,
                 "max_lr": max_lr,
                 "min_lr": min_lr,
+                "lr_decay_steps": lr_decay_steps,
                 "wd": wd,
                 "beta1": beta1,
                 "beta2": beta2,
@@ -250,12 +393,8 @@ def train():
             optimizer = nn.optim.SGD(params, lr=0, weight_decay=wd)
         case "adam":
             optimizer = Adam(params, lr=0, weight_decay=wd, beta1=beta1, beta2=beta2)
-        case "intermediate_adam":
-            raise NotImplementedError
-            optimizer = IntermediateAdam(params, lr=0, weight_decay=wd)
-        case "cayley":
-            raise NotImplementedError
-            optimizer = CayleyAdam(params, lr=0, weight_decay=wd)
+        case "tadam":
+            optimizer = TADAM(params, lr=0, weight_decay=wd, beta1=beta1, beta2=beta2)
         case _:
             raise ValueError(f"Unknown optimizer name: {optimizer_name}")
 
@@ -313,7 +452,7 @@ def train():
             lr = max_lr * (step / warmup_steps)
         else:
             # Cosine annealing
-            decay_ratio = (step - warmup_steps) / (train_steps - warmup_steps)
+            decay_ratio = (step - warmup_steps) / (lr_decay_steps - warmup_steps)
             assert 0.0 <= decay_ratio <= 1.0
             coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
             lr = min_lr + coeff * (max_lr - min_lr)

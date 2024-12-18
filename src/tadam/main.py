@@ -11,7 +11,7 @@ from tinygrad.helpers import tqdm
 
 import wandb
 from tadam.model import GPT, GPTConfig
-from tadam.optim import Adam, CayleyAdam, IntermediateAdam
+from tadam.optim import Adam, CayleyAdam, TADAM
 
 Tensor.manual_seed(127)
 np.random.seed(127)
@@ -104,7 +104,7 @@ def beam():
                 optimizer = Adam(params, lr=1e-3, weight_decay=2)
             case "intermediate_adam":
                 raise NotImplementedError
-                optimizer = IntermediateAdam(params, lr=1e-3, weight_decay=2)
+                optimizer = TADAM(params, lr=1e-3, weight_decay=2)
             case "cayley":
                 raise NotImplementedError
                 optimizer = CayleyAdam(params, lr=1e-3, weight_decay=2)
@@ -200,7 +200,7 @@ def train():
             optimizer = Adam(params, lr=0, weight_decay=wd)
         case "intermediate_adam":
             raise NotImplementedError
-            optimizer = IntermediateAdam(params, lr=0, weight_decay=wd)
+            optimizer = TADAM(params, lr=0, weight_decay=wd)
         case "cayley":
             raise NotImplementedError
             optimizer = CayleyAdam(params, lr=0, weight_decay=wd)

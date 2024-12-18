@@ -42,6 +42,8 @@ class Scale:
 
 
 class Linear:
+    """Linear layer that is optionally normalized wrt"""
+
     def __init__(self, in_features: int, out_features: int, config: GPTConfig, init_std: float | None = None):
         if init_std is None:
             init_std = config.base_scale
@@ -51,10 +53,11 @@ class Linear:
             # Set special attribute to indicate the weights are supposed to be normalized after each optimization step.
             self.weight.__normalized__ = True
         else:
-            # to indicate we want to weight decay this parameter
+            # Set special attribute to indicate we want to weight decay this parameter
             self.weight.__wd__ = True
 
     def __call__(self, x: Tensor) -> Tensor:
+        # (..., in_features) x (in_features, out_features) -> (..., out_features)
         return x.matmul(self.weight.transpose())
 
 
@@ -136,10 +139,11 @@ class MultiHeadAttention:
         q, k = apply_rope(q, k, rope_cache)
         if self.config.ngpt:
             s_qk = self.s_qk().rearrange("(H D) -> 1 H 1 D", D=D)
-            # q = normalize(q) * s_qk
-            # k = normalize(k) * s_qk
-            q = q * s_qk
-            k = k * s_qk
+            q = normalize(q) * s_qk
+            k = normalize(k) * s_qk
+            # shouldn't change anything to remove them (cf. Table 6 in Annex 8)
+            # q = q * s_qk
+            # k = k * s_qk
 
         softmax_scale = math.sqrt(D) if self.config.ngpt else 1 / math.sqrt(D)
         att = (q @ k.transpose(-2, -1)) * softmax_scale  # (B, H, C, C)
