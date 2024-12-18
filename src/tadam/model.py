@@ -187,10 +187,11 @@ class Block:
             self.alpha_mlp = Scale(config.n_embd, init=1 / config.n_layer, scale=config.base_scale)
         else:
             # layer normalization
-            self.ln_1 = nn.LayerNorm(config.n_embd, elementwise_affine=False)
-            self.ln_2 = nn.LayerNorm(config.n_embd, elementwise_affine=False)
+            self.ln_1 = nn.RMSNorm(config.n_embd)
+            self.ln_2 = nn.RMSNorm(config.n_embd)
 
     def __call__(self, x: Tensor, rope_cache: Tensor):
+        # x has shape (B, C, E)
         if self.config.ngpt:
             # LERP between x and attn(x):  x + alpha * (attn(x) - x) = (1 - alpha) * x + alpha * attn(x)
             x = normalize(x + self.alpha_attn() * (normalize(self.attn(x, rope_cache)) - x))
@@ -216,6 +217,8 @@ class GPT:
         self.lm_head = Linear(config.n_embd, config.padded_vocab_size, config)
         if config.ngpt:
             self.s_z = Scale(config.padded_vocab_size, init=1.0, scale=config.base_scale)
+        else:
+            self.ln_f = nn.RMSNorm(config.n_embd)
         # weight tying (https://paperswithcode.com/method/weight-tying)
         assert self.wte.weight.shape == self.lm_head.weight.shape
         self.wte.weight = self.lm_head.weight
@@ -235,6 +238,8 @@ class GPT:
         # crop RoPE cache to context length
         rope_cache = self.rope_cache[:C, ...]
         x = tok_emb.sequential(functools.partial(layer, rope_cache=rope_cache) for layer in self.h)  # B,C,E
+        if not self.config.ngpt:
+            x = self.ln_f(x)
         logits = self.lm_head(x) if not eval else self.lm_head(x[:, [-1], :])  # B,C,V or B,1,V
         if self.config.ngpt:
             logits = logits * self.s_z()
