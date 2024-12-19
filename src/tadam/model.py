@@ -139,13 +139,11 @@ class MultiHeadAttention:
         q, k = apply_rope(q, k, rope_cache)
         if self.config.ngpt:
             s_qk = self.s_qk().rearrange("(H D) -> 1 H 1 D", D=D)
-            q = normalize(q) * s_qk
-            k = normalize(k) * s_qk
             # shouldn't change anything to remove them (cf. Table 6 in Annex 8)
-            # q = q * s_qk
-            # k = k * s_qk
+            q = q * s_qk
+            k = k * s_qk
 
-        softmax_scale = math.sqrt(D) if self.config.ngpt else 1 / math.sqrt(D)
+        softmax_scale = math.sqrt(E * self.config.n_head) if self.config.ngpt else 1 / math.sqrt(D)
         att = (q @ k.transpose(-2, -1)) * softmax_scale  # (B, H, C, C)
         att = att.masked_fill(self.causal_mask[:C, :C], -float("inf"))
         att = att.softmax()
@@ -168,10 +166,8 @@ class MLP:
     def __call__(self, x: Tensor) -> Tensor:
         uv = self.c_fc(x)
         if self.config.ngpt:
-            uv = uv * self.s_uv().view(1, 1, -1) * math.sqrt(self.config.n_embd)
+            uv = uv * self.s_uv().view(1, 1, -1)
         u, v = uv.split(uv.shape[-1] // 2, dim=-1)
-        # if self.config.ngpt:
-        #     v = v * math.sqrt(self.config.n_embd)
         return self.c_proj(u * v.silu())
 
 

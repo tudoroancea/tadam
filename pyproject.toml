@@ -31,6 +31,7 @@ train_char = "tadam.main_char:train"
 inference_char = "tadam.main_char:inference"
 naive_inference_char = "tadam.main_char:naive_inference"
 analyze_grads_char = "tadam.main_char:analyze_grads"
+analyze_params = "tadam.analyze_params:main"
 
 [build-system]
 requires = ["hatchling"]
