@@ -32,6 +32,7 @@ inference_char = "tadam.main_char:inference"
 naive_inference_char = "tadam.main_char:naive_inference"
 analyze_grads_char = "tadam.main_char:analyze_grads"
 analyze_params = "tadam.analyze_params:main"
+sweep = "tadam.main_char:sweep"
 
 [build-system]
 requires = ["hatchling"]
@@ -56,3 +57,4 @@ select = [
     # flake8-bugbear
     "B",
 ]
+ignore = ["E741"]

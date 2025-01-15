@@ -4,6 +4,8 @@ import pickle
 import time
 from argparse import ArgumentParser
 from collections import defaultdict
+from itertools import product
+from typing import Any
 
 import numpy as np
 from icecream import ic
@@ -301,87 +303,78 @@ def analyze_grads():
     plt.show()
 
 
-def train():
-    ### Parse cli arguments
-    parser = ArgumentParser()
-    parser.add_argument("--model", type=str, default="gpt")
-    parser.add_argument("--optimizer", type=str, default="adam")
-    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--train_steps", type=int, default=5000)
-    parser.add_argument("--eval_steps", type=int, default=20)
-    parser.add_argument("--eval_interval", type=int, default=200)
-    parser.add_argument("--warmup_steps", type=int, default=0)
-    parser.add_argument("--max_lr", type=float, default=1e-3)
-    parser.add_argument("--min_lr", type=float, default=None)
-    parser.add_argument("--lr_decay_steps", type=int, default=None)
-    parser.add_argument("--wd", type=float, default=1e-1)
-    parser.add_argument("--beta1", type=float, default=0.9)
-    parser.add_argument("--beta2", type=float, default=0.999)
-    parser.add_argument("--save_checkpoints", action="store_true")
-    parser.add_argument("--silent", action="store_true")
-    parser.add_argument("--skip_eval", action="store_true")
-    args = parser.parse_args()
-    model_name = args.model
-    optimizer_name = args.optimizer
-    ctx_len = args.ctx_len
-    batch_size = args.batch_size
-    train_steps = args.train_steps
-    eval_steps = args.eval_steps
-    eval_interval = args.eval_interval
-    warmup_steps = args.warmup_steps
-    max_lr = args.max_lr
-    min_lr = args.min_lr
+def train_function(
+    model_name: str = "gpt",
+    optimizer_name: str = "adam",
+    ctx_len: int = GPTConfig.block_size,
+    batch_size: int = 64,
+    train_steps: int = 200,
+    eval_steps: int = 20,
+    eval_interval: int = 200,
+    warmup_steps: int = 0,
+    max_lr: float = 1e-3,
+    min_lr: float = None,
+    lr_decay_steps: float = None,
+    wd: float = 1e-1,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
+    save_checkpoints: float = True,
+    skip_eval: float = False,
+    n_layer: int = 1,
+    n_head: int = 1,
+    n_embd: int = 128,
+    s_z_init: float = 1.0,
+    s_qk_init: float = 1.0,
+):
     if min_lr is None:
         min_lr = max_lr / 10  # as per Chinchilla
-    lr_decay_steps = args.lr_decay_steps
     if lr_decay_steps is None:
         lr_decay_steps = train_steps
-    wd = args.wd
-    beta1 = args.beta1
-    beta2 = args.beta2
-    save_checkpoints = args.save_checkpoints
-    silent = args.silent
-    skip_eval = args.skip_eval
 
     ### Create logging stuff
     os.makedirs("checkpoints", exist_ok=True)
-    if not silent:
-        wandb.init(
-            project="tadam",
-            name=f"{model_name}-{optimizer_name}-{max_lr}",
-            config={
-                "model": model_name,
-                "optimizer": optimizer_name,
-                "train_steps": train_steps,
-                "eval_steps": eval_steps,
-                "eval_interval": eval_interval,
-                "warmup_steps": warmup_steps,
-                "max_lr": max_lr,
-                "min_lr": min_lr,
-                "lr_decay_steps": lr_decay_steps,
-                "wd": wd,
-                "beta1": beta1,
-                "beta2": beta2,
-                "batch_size": batch_size,
-                "device": Device.DEFAULT,
-                "beam": os.getenv("BEAM", 0),
-            },
-        )
+    run = wandb.init(
+        project="tadam",
+        name=f"{model_name}-{optimizer_name}-{max_lr}",
+        config={
+            "model": model_name,
+            "optimizer": optimizer_name,
+            "train_steps": train_steps,
+            "eval_steps": eval_steps,
+            "eval_interval": eval_interval,
+            "warmup_steps": warmup_steps,
+            "max_lr": max_lr,
+            "min_lr": min_lr,
+            "lr_decay_steps": lr_decay_steps,
+            "wd": wd,
+            "beta1": beta1,
+            "beta2": beta2,
+            "batch_size": batch_size,
+            "device": Device.DEFAULT,
+            "beam": os.getenv("BEAM", 0),
+        },
+    )
 
     ### Load data
     train_tokens = load_tokens(TRAIN_DATA_FILE)
     eval_tokens = load_tokens(EVAL_DATA_FILE)
     with open(META_DATA_FILE, "rb") as f:
         meta = pickle.load(f)
-    if not silent:
-        print(
-            f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
-            f"{len(eval_tokens)/1e3:.2f}K validation tokens."
-        )
+    print(
+        f"Dataset size: {len(train_tokens) / 1e3:.2f}K training tokens and "
+        f"{len(eval_tokens) / 1e3:.2f}K validation tokens."
+    )
 
     ### Create model and optimizer
-    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"])
+    config = GPTConfig(
+        ngpt=model_name == "ngpt",
+        vocab_size=meta["vocab_size"],
+        n_layer=n_layer,
+        n_head=n_head,
+        n_embd=n_embd,
+        s_z_init=s_z_init,
+        s_qk_init=s_qk_init,
+    )
     assert 1 <= ctx_len <= config.block_size
     model = GPT(config)
     state_dict = nn.state.get_state_dict(model)
@@ -398,10 +391,9 @@ def train():
         case _:
             raise ValueError(f"Unknown optimizer name: {optimizer_name}")
 
-    if not silent:
-        trainable_params_dict = {k: v for k, v in state_dict.items() if v.requires_grad}
-        total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
-        ic(trainable_params_dict, total_number_trainable_parameters)
+    trainable_params_dict = {k: v for k, v in state_dict.items() if v.requires_grad}
+    total_number_trainable_parameters = f"{sum(p.numel() for p in optimizer.params) / 1e6:.2f}M"
+    ic(trainable_params_dict, total_number_trainable_parameters)
 
     ### Setup training and eval steps
     @TinyJit
@@ -439,9 +431,8 @@ def train():
     ### Run the loop
     best_eval_loss = float("inf")
     eval_loss = float("inf")
-    if not silent:
-        print("Starting training...\n=================\n")
-    for step in (pbar := range(train_steps) if silent else tqdm(range(train_steps), unit="steps")):
+    print("Starting training...\n=================\n")
+    for step in (pbar := tqdm(range(train_steps), unit="steps")):
         # Evaluation step
         if step % eval_interval == 0 and not skip_eval:
             best_eval_loss, eval_loss = perform_eval(best_eval_loss, eval_loss)
@@ -472,26 +463,68 @@ def train():
         memory_gb = GlobalCounters.mem_used / 1e9
 
         # Logging
-        if not silent:
-            wandb.log(
-                {
-                    "lr": lr,
-                    "train_loss": train_loss,
-                    "performance/ktok_per_s": ktok_per_s,
-                    "performance/step_runtime_ms": step_runtime_ms,
-                    "performance/TFLOPS": tflops,
-                }
-            )
-            pbar.desc = (
-                f"train loss: {train_loss:.4f}, eval loss: {eval_loss:.4f}, "
-                f"step time: {step_runtime_ms:.4f}ms, {ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
-            )
+        wandb.log(
+            {
+                "lr": lr,
+                "train_loss": train_loss,
+                "performance/ktok_per_s": ktok_per_s,
+                "performance/step_runtime_ms": step_runtime_ms,
+                "performance/TFLOPS": tflops,
+            }
+        )
+        pbar.desc = (
+            f"train loss: {train_loss:.4f}, eval loss: {eval_loss:.4f}, "
+            f"step time: {step_runtime_ms:.4f}ms, {ktok_per_s:.2f} Ktok/s, {tflops:.2f} TFLOPS, {memory_gb:.2f} GB "
+        )
 
     best_eval_loss, eval_loss = perform_eval(best_eval_loss, eval_loss)
     if save_checkpoints:
         checkpoint_path = f"checkpoints/final_{model_name}.safetensors"
         nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
         wandb.save(checkpoint_path)
+
+    return run.id, train_loss, eval_loss, best_eval_loss
+
+
+def train():
+    parser = ArgumentParser()
+    parser.add_argument("--model", type=str, default="gpt")
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--train_steps", type=int, default=5000)
+    parser.add_argument("--eval_steps", type=int, default=20)
+    parser.add_argument("--eval_interval", type=int, default=200)
+    parser.add_argument("--warmup_steps", type=int, default=0)
+    parser.add_argument("--max_lr", type=float, default=1e-3)
+    parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--lr_decay_steps", type=int, default=None)
+    parser.add_argument("--wd", type=float, default=1e-1)
+    parser.add_argument("--beta1", type=float, default=0.9)
+    parser.add_argument("--beta2", type=float, default=0.999)
+    parser.add_argument("--save_checkpoints", action="store_true")
+    parser.add_argument("--silent", action="store_true")
+    parser.add_argument("--skip_eval", action="store_true")
+    args = parser.parse_args()
+    train_function(
+        args.model,
+        args.optimizer,
+        args.ctx_len,
+        args.batch_size,
+        args.train_steps,
+        args.eval_steps,
+        args.eval_interval,
+        args.warmup_steps,
+        args.max_lr,
+        args.min_lr,
+        args.lr_decay_steps,
+        args.wd,
+        args.beta1,
+        args.beta2,
+        args.save_checkpoints,
+        args.silent,
+        args.skip_eval,
+    )
 
 
 def inference():
@@ -525,3 +558,59 @@ def inference():
         output = output[0].numpy().tolist()
         probs = probs[0].numpy()
         print(tokenizer.decode(output))
+
+
+def generate_combinations(input_dict: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    keys = input_dict.keys()
+    value_combinations = product(*input_dict.values())
+    return [dict(zip(keys, combination, strict=True)) for combination in value_combinations]
+
+
+def sweep():
+    model_sizes = {
+        "small": {"n_layer": 1, "n_head": 1, "n_embd": 128},
+        "medium": {"n_layer": 4, "n_head": 4, "n_embd": 256},
+        "large": {"n_layer": 6, "n_head": 6, "n_embd": 384},
+    }
+    all_hyperparams = {
+        "gpt": {
+            "model_size": list(model_sizes.keys()),
+            "max_lr": [1e-3, 5e-4, 1e-4],
+            "wd": [0.0, 0.01, 0.1],
+            # "max_lr": [1e-3],
+            # "wd": [0.1],
+        },
+        "ngpt": {
+            "model_size": list(model_sizes.keys()),
+            "max_lr": [1e-3, 5e-4, 1e-4],
+            "s_z_init": [1.0, 5.0, 10.0],
+            "s_qk_init": [0.5, 1.0],
+            # "max_lr": [1e-3],
+            # "s_z_init": [5.0],
+            # "s_qk_init": [0.5],
+        },
+    }
+
+    # manual sweep:
+    # we save a csv with each config tried, the run id, the final train loss, final eval loss, best eval loss
+    # this already lets us create the table
+    # Then we can also recreate the plots of the losses evolution by fetching the data of the appropriate runs
+    for model_name, model_hyperparams in all_hyperparams.items():
+        print(f"Sweep for {model_name}")
+        with open(f"sweep_{model_name}.csv", "w") as f:
+            f.write(",".join(model_hyperparams.keys()) + ",run_id,final_train_loss,final_eval_loss,best_eval_loss\n")
+        for hyperparams in generate_combinations(model_hyperparams):
+            csv_line = ",".join(map(str, hyperparams.values()))
+            print("Running hyperparameter combination:", hyperparams)
+            hyperparams.update(model_sizes[hyperparams.pop("model_size")])
+            run_id, final_train_loss, final_eval_loss, best_eval_loss = train_function(
+                model_name=model_name,
+                train_steps=1000,
+                eval_steps=20,
+                eval_interval=200,
+                lr_decay_steps=5000,
+                **hyperparams,
+            )
+            csv_line += f",{run_id},{final_train_loss},{final_eval_loss},{best_eval_loss}\n"
+            with open(f"sweep_{model_name}.csv", "a") as f:
+                f.write(csv_line)

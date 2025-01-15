@@ -188,6 +188,7 @@ def train():
             f"Dataset size: {len(train_tokens)/1e3:.2f}K training tokens and "
             f"{len(eval_tokens)/1e3:.2f}K validation tokens."
         )
+    return
 
     ### Create model and optimizer
     config = GPTConfig(ngpt=model_name == "ngpt")

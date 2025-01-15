@@ -11,12 +11,16 @@ __all__ = ["GPTConfig", "GPT"]
 
 @dataclass
 class GPTConfig:
+    """bruh"""
+
     ngpt: bool = False
     block_size: int = 256
     vocab_size: int = 65
     n_layer: int = 4
     n_head: int = 4
     n_embd: int = 256
+    s_qk_init: float = 1.0
+    s_z_init: float = 1.0
 
     @property
     def padded_vocab_size(self):
@@ -123,7 +127,7 @@ class MultiHeadAttention:
         )
         # query and key scaling
         if config.ngpt:
-            self.s_qk = Scale(config.n_embd, init=1.0, scale=config.base_scale)
+            self.s_qk = Scale(config.n_embd, init=config.s_qk_init, scale=config.base_scale)
         # attention causal mask
         self.causal_mask = Tensor.ones(config.block_size, config.block_size).triu(1)
         self.causal_mask.requires_grad = False
@@ -179,8 +183,9 @@ class Block:
         self.mlp = MLP(config)
         if config.ngpt:
             # eigen learning rates
-            self.alpha_attn = Scale(config.n_embd, init=1 / config.n_layer, scale=config.base_scale)
-            self.alpha_mlp = Scale(config.n_embd, init=1 / config.n_layer, scale=config.base_scale)
+            # for some reason initializing init=1.0 doesn't work..
+            self.alpha_attn = Scale(config.n_embd, init=1.00001, scale=config.base_scale)
+            self.alpha_mlp = Scale(config.n_embd, init=1.00001, scale=config.base_scale)
         else:
             # layer normalization
             self.ln_1 = nn.RMSNorm(config.n_embd)
@@ -212,7 +217,7 @@ class GPT:
         self.h = [Block(config) for _ in range(config.n_layer)]
         self.lm_head = Linear(config.n_embd, config.padded_vocab_size, config)
         if config.ngpt:
-            self.s_z = Scale(config.padded_vocab_size, init=1.0, scale=config.base_scale)
+            self.s_z = Scale(config.padded_vocab_size, init=config.s_z_init, scale=config.base_scale)
         else:
             self.ln_f = nn.RMSNorm(config.n_embd)
         # weight tying (https://paperswithcode.com/method/weight-tying)
