@@ -19,3 +19,7 @@ data
 
 # Misc
 .DS_Store
+
+*.csv
+*.svg
+*.png

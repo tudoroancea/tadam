@@ -483,6 +483,7 @@ def train_function(
         nn.state.safe_save(nn.state.get_state_dict(model), checkpoint_path)
         wandb.save(checkpoint_path)
 
+    run.finish()
     return run.id, train_loss, eval_loss, best_eval_loss
 
 
