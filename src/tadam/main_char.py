@@ -227,10 +227,10 @@ def analyze_grads():
         loss = model(x).sparse_categorical_crossentropy(y)
         loss.backward()
         grad_normal_residuals = {
-            k: (p * p.grad).sum(-1) for k, p in state_dict.items() if p.grad is not None and p.ndim == 2
+            k: (p * p.grad).sum(-1).abs() for k, p in state_dict.items() if p.grad is not None and p.ndim == 2
         }
         grad_tangent_residuals = {
-            k: (state_dict[k].grad.square().sum(-1) + grad_normal_residuals[k].square()).sqrt()
+            k: (state_dict[k].grad.square().sum(-1) - grad_normal_residuals[k].square()).sqrt()
             for k in grad_normal_residuals
         }
 
@@ -285,21 +285,31 @@ def analyze_grads():
     # x axis = step
     # scatter plot in red points for the normal residuals, in blue points for the tangent residuals
     # breakpoint()
-    n = {k: np.array(v) for k, v in n.items()}
-    t = {k: np.array(v) for k, v in t.items()}
+    n = {k: np.array(v).T for k, v in n.items()}
+    t = {k: np.array(v).T for k, v in t.items()}
     for k in n:
-        plt.figure()
-        plt.scatter(np.repeat(np.arange(n[k].shape[0]), n[k].shape[1]), np.ravel(n[k]), c="r", label="normal residuals")
-        plt.scatter(
-            np.repeat(np.arange(t[k].shape[0]), t[k].shape[1]), np.ravel(t[k]), c="b", label="tangent residuals"
-        )
-        plt.legend(
-            loc="best",
-        )
+        # plt.figure()
+        plt.subplot(121)
+        plt.boxplot(n[k], patch_artist=True)
+        plt.title("Normal")
         plt.yscale("log")
-        plt.title(f"Gradient residuals for weight {k}")
         plt.xlabel("Step")
         plt.ylabel("residuals")
+        plt.subplot(122, sharey=plt.gca())
+        plt.boxplot(t[k], patch_artist=True)
+        plt.title("Tangent")
+        plt.yscale("log")
+        plt.xlabel("Step")
+        plt.ylabel("residuals")
+        # plt.scatter(np.repeat(np.arange(n[k].shape[0]), n[k].shape[1]), np.ravel(n[k]), c="r", label="normal residuals")
+        # plt.scatter(
+        #     np.repeat(np.arange(t[k].shape[0]), t[k].shape[1]), np.ravel(t[k]), c="b", label="tangent residuals"
+        # )
+        # plt.legend( loc="best" )
+        plt.suptitle(f"Gradient residuals for weight {k}")
+        plt.tight_layout()
+
+        break
     plt.show()
 
 
