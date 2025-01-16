@@ -8,11 +8,11 @@ from itertools import product
 from typing import Any
 
 import numpy as np
+import wandb
 from icecream import ic
 from tinygrad import Context, Device, GlobalCounters, Tensor, TinyJit, nn  # type: ignore
 from tinygrad.helpers import tqdm
 
-import wandb
 from tadam.model import GPT, GPTConfig
 from tadam.optim import TADAM, Adam
 
@@ -168,8 +168,10 @@ def beam():
 def analyze_grads():
     import matplotlib as mpl
     import matplotlib.pyplot as plt
+    import scienceplots  # noqa: F401
 
-    mpl.use("qtagg")
+    # mpl.use("qtagg")
+    plt.style.use("science")
 
     ### Parse cli arguments
     parser = ArgumentParser()
@@ -178,7 +180,7 @@ def analyze_grads():
     parser.add_argument("--ctx_len", type=int, default=GPTConfig.block_size)
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--warmup_steps", type=int, default=0)
-    parser.add_argument("--max_lr", type=float, default=1e-3)
+    parser.add_argument("--max_lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=None)
     parser.add_argument("--wd", type=float, default=1e-1)
     parser.add_argument("--beta1", type=float, default=0.9)
@@ -203,7 +205,7 @@ def analyze_grads():
         meta = pickle.load(f)
 
     ### Create model and optimizer
-    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"])
+    config = GPTConfig(ngpt=model_name == "ngpt", vocab_size=meta["vocab_size"], s_z_init=10.0, s_qk_init=1.0)
     assert 1 <= ctx_len <= config.block_size
     model = GPT(config)
     state_dict = nn.state.get_state_dict(model)
@@ -233,6 +235,9 @@ def analyze_grads():
             k: (state_dict[k].grad.square().sum(-1) - grad_normal_residuals[k].square()).sqrt()
             for k in grad_normal_residuals
         }
+        for k in ["wte.weight", "lm_head.weight"]:
+            grad_normal_residuals[k] = grad_normal_residuals[k][:65]
+            grad_tangent_residuals[k] = grad_tangent_residuals[k][:65]
 
         return (
             loss.realize(*optimizer.schedule_step(), *grad_normal_residuals.values(), *grad_tangent_residuals.values()),
@@ -288,7 +293,7 @@ def analyze_grads():
     n = {k: np.array(v).T for k, v in n.items()}
     t = {k: np.array(v).T for k, v in t.items()}
     for k in n:
-        # plt.figure()
+        plt.figure(figsize=(6, 4))
         plt.subplot(121)
         plt.boxplot(n[k], patch_artist=True)
         plt.title("Normal")
@@ -300,16 +305,12 @@ def analyze_grads():
         plt.title("Tangent")
         plt.yscale("log")
         plt.xlabel("Step")
-        plt.ylabel("residuals")
         # plt.scatter(np.repeat(np.arange(n[k].shape[0]), n[k].shape[1]), np.ravel(n[k]), c="r", label="normal residuals")
-        # plt.scatter(
-        #     np.repeat(np.arange(t[k].shape[0]), t[k].shape[1]), np.ravel(t[k]), c="b", label="tangent residuals"
-        # )
+        # plt.scatter( np.repeat(np.arange(t[k].shape[0]), t[k].shape[1]), np.ravel(t[k]), c="b", label="tangent residuals")
         # plt.legend( loc="best" )
-        plt.suptitle(f"Gradient residuals for weight {k}")
+        # plt.suptitle(f"Gradient residuals for weight {k}")
         plt.tight_layout()
-
-        break
+        plt.savefig(f"img/grads_{k}.svg")
     plt.show()
 
 
